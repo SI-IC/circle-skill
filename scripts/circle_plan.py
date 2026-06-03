@@ -137,3 +137,142 @@ def add_marker(
     else:
         raw.insert(t.heading_line + 1, marker)
     return _reassemble(raw, text)
+
+
+from collections import Counter
+
+
+def summary(phases):
+    counts = Counter(p.status for p in phases)
+
+    def lst(s):
+        return [
+            {"id": p.id, "title": p.title, "obstacle": p.obstacle}
+            for p in phases
+            if p.status == s
+        ]
+
+    return {
+        "total": len(phases),
+        "counts": dict(counts),
+        "done": lst("done"),
+        "pending": lst("pending"),
+        "in_progress": lst("in_progress"),
+        "blocked": lst("blocked"),
+        "skipped": lst("skipped"),
+        "needs_human": [
+            {"id": p.id, "title": p.title}
+            for p in phases
+            if p.autonomy == "needs-human" and p.status != "done"
+        ],
+        "complete": is_complete(phases),
+    }
+
+
+def _phase_dict(p):
+    return {
+        "id": p.id,
+        "title": p.title,
+        "status": p.status,
+        "order": p.order,
+        "deps": p.deps,
+        "autonomy": p.autonomy,
+        "obstacle": p.obstacle,
+    }
+
+
+def _read(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _write_file(path, text):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def main(argv=None):
+    import argparse
+    import json
+    import sys
+
+    ap = argparse.ArgumentParser(prog="circle_plan")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("next", "complete", "summary", "phases"):
+        sp = sub.add_parser(name)
+        sp.add_argument("plan")
+        if name in ("summary", "phases"):
+            sp.add_argument("--json", action="store_true")
+    sp = sub.add_parser("set-status")
+    sp.add_argument("plan")
+    sp.add_argument("id")
+    sp.add_argument("status")
+    sp.add_argument("--obstacle", default=None)
+    sp = sub.add_parser("add-marker")
+    sp.add_argument("plan")
+    sp.add_argument("id")
+    sp.add_argument("--status", default="pending")
+    sp.add_argument("--order", type=int, default=0)
+    sp.add_argument("--deps", default="")
+    sp.add_argument("--autonomy", default="auto")
+    sp.add_argument("--obstacle", default="")
+    a = ap.parse_args(argv)
+
+    phases = parse_phases(_read(a.plan))
+    if a.cmd == "next":
+        nxt = select_next(phases)
+        print("NONE" if nxt is None else f"{nxt.id}\t{nxt.title}")
+        return 0
+    if a.cmd == "complete":
+        return 0 if is_complete(phases) else 1
+    if a.cmd == "summary":
+        s = summary(phases)
+        if getattr(a, "json", False):
+            print(json.dumps(s, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"Всего фаз: {s['total']}  |  "
+                + "  ".join(f"{k}={v}" for k, v in sorted(s["counts"].items()))
+            )
+            for b in s["blocked"]:
+                print(f"  blocked  {b['id']} — {b['title']}: {b['obstacle']}")
+            for b in s["skipped"]:
+                print(f"  skipped  {b['id']} — {b['title']}")
+        return 0
+    if a.cmd == "phases":
+        data = [_phase_dict(p) for p in phases]
+        print(
+            json.dumps(data, ensure_ascii=False, indent=2)
+            if a.json
+            else "\n".join(
+                f"{p['id']}\t{p['status']}\t{p['autonomy']}\t{p['title']}" for p in data
+            )
+        )
+        return 0
+    if a.cmd == "set-status":
+        _write_file(
+            a.plan, set_status(_read(a.plan), a.id, a.status, obstacle=a.obstacle)
+        )
+        return 0
+    if a.cmd == "add-marker":
+        deps = [x.strip() for x in a.deps.split(",") if x.strip()]
+        _write_file(
+            a.plan,
+            add_marker(
+                _read(a.plan),
+                a.id,
+                status=a.status,
+                order=a.order,
+                deps=deps,
+                autonomy=a.autonomy,
+                obstacle=a.obstacle,
+            ),
+        )
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())

@@ -150,5 +150,72 @@ class TestWrite(unittest.TestCase):
         self.assertEqual(ph[0].status, "done")
 
 
+import json
+import subprocess
+import tempfile
+
+
+class TestSummaryCLI(unittest.TestCase):
+    PLAN = (
+        "## Фаза 1 — A\n"
+        '<!-- circle: status=done order=10 deps=[] autonomy=auto obstacle="" -->\n'
+        "## Фаза 2 — B\n"
+        '<!-- circle: status=blocked order=20 deps=[] autonomy=auto obstacle="нет БД" -->\n'
+        "## Фаза 3 — C\n"
+        '<!-- circle: status=pending order=30 deps=[1] autonomy=auto obstacle="" -->\n'
+    )
+
+    def test_summary_counts(self):
+        s = cp.summary(cp.parse_phases(self.PLAN))
+        self.assertEqual(s["counts"]["done"], 1)
+        self.assertEqual(s["counts"]["blocked"], 1)
+        self.assertEqual(s["blocked"][0]["obstacle"], "нет БД")
+
+    def _write(self, text):
+        f = tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        )
+        f.write(text)
+        f.close()
+        return f.name
+
+    def _cli(self, *args):
+        script = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "circle_plan.py"
+        )
+        return subprocess.run(
+            [sys.executable, script, *args], capture_output=True, text=True
+        )
+
+    def test_cli_next_prints_id_tab_title(self):
+        path = self._write(self.PLAN)
+        r = self._cli("next", path)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), "3\tC")
+
+    def test_cli_next_none_when_complete(self):
+        path = self._write(
+            self.PLAN.replace(
+                "status=pending order=30 deps=[1]", "status=done order=30 deps=[1]"
+            )
+        )
+        r = self._cli("next", path)
+        self.assertEqual(r.stdout.strip(), "NONE")
+
+    def test_cli_set_status_roundtrip(self):
+        path = self._write(self.PLAN)
+        self._cli("set-status", path, "3", "done")
+        with open(path, encoding="utf-8") as fh:
+            p = {x.id: x for x in cp.parse_phases(fh.read())}
+        self.assertEqual(p["3"].status, "done")
+
+    def test_cli_phases_json(self):
+        path = self._write(self.PLAN)
+        r = self._cli("phases", path, "--json")
+        data = json.loads(r.stdout)
+        self.assertEqual(len(data), 3)
+        self.assertEqual(data[0]["id"], "1")
+
+
 if __name__ == "__main__":
     unittest.main()
