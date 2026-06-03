@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# circle-skill: правило «инкремент версии при пуше main».
+# Блокирует push ветки main, если версия в plugin.json не выше последнего релиз-тега
+# circle-skill--v*. Поднимай версию через ./scripts/release.sh (он пушит сам).
+# Обойти разово: git push --no-verify.
+set -uo pipefail
+
+PY="${CIRCLE_PYTHON:-python3}"
+REPO="$(git rev-parse --show-toplevel)"
+
+gt() {  # печатает 1, если $1 > $2 (семвер), иначе 0
+  "$PY" -c 'import sys
+a=tuple(int(x) for x in sys.argv[1].split("."))
+b=tuple(int(x) for x in sys.argv[2].split("."))
+print(1 if a>b else 0)' "$1" "$2"
+}
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+
+  if ! CUR="$("$PY" "$REPO/scripts/bump_version.py" --current 2>/dev/null)"; then
+    echo "pre-push: не удалось прочитать версию (рассинхрон plugin.json/marketplace.json?)." >&2
+    echo "          Почини версии или: git push --no-verify" >&2
+    exit 1
+  fi
+
+  LAST="$(git tag --list 'circle-skill--v*' | sed 's/^circle-skill--v//' \
+          | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+  if [ -z "$LAST" ]; then
+    exit 0  # релиз-тегов ещё нет — первый релиз разрешён
+  fi
+
+  if [ "$(gt "$CUR" "$LAST")" != "1" ]; then
+    echo "pre-push: версия $CUR не выше последнего релиза $LAST — push main заблокирован." >&2
+    echo "          Подними версию:  ./scripts/release.sh [patch|minor|major]  (он сам пушит)." >&2
+    echo "          Разовый обход:    git push --no-verify" >&2
+    exit 1
+  fi
+done
+exit 0

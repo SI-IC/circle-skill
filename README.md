@@ -31,9 +31,33 @@
 ## Установка
 
 ```bash
-claude plugin marketplace add <git-url-этого-репозитория>
+claude plugin marketplace add https://github.com/SI-IC/circle-skill.git
 claude plugin install circle-skill@circle-skill
 ```
+
+## Версионирование и релиз
+
+Версия живёт в `.claude-plugin/plugin.json` и зеркалится в `marketplace.json` (значения обязаны
+совпадать — это проверяет `claude plugin tag`). Версия семвер `MAJOR.MINOR.PATCH`.
+
+**Правило: каждый push ветки `main` поднимает версию.** Релиз делается одной командой — она
+поднимает версию в обоих манифестах, коммитит, пушит ветку и ставит тег `circle-skill--vX.Y.Z`:
+
+```bash
+./scripts/release.sh            # patch (по умолчанию): 0.1.0 → 0.1.1
+./scripts/release.sh minor      # 0.1.3 → 0.2.0
+./scripts/release.sh major      # 0.4.2 → 1.0.0
+```
+
+Правило навязывается git-хуком `.githooks/pre-push`: прямой `git push origin main` без поднятой
+версии (≤ последнего релиз-тега) **отклоняется**. Хук активируется per-clone — **после `git clone`
+выполни один раз:**
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Разовый обход (например, правка вне релиза): `git push --no-verify`.
 
 ## Формат плана
 
