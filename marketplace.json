@@ -1,0 +1,14 @@
+{
+  "name": "circle-skill",
+  "description": "Маркетплейс плагина circle-skill",
+  "owner": { "name": "Alex", "email": "shum.sts@gmail.com" },
+  "plugins": [
+    {
+      "name": "circle-skill",
+      "description": "Автономное исполнение фазового плана в цикле отдельными интерактивными сессиями.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": { "name": "Alex", "email": "shum.sts@gmail.com" }
+    }
+  ]
+}
