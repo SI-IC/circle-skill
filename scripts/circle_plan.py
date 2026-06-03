@@ -63,3 +63,29 @@ def parse_phases(text: str) -> list:
                 break
         phases.append(ph)
     return phases
+
+
+def _dep_done(by_id, dep):
+    p = by_id.get(dep)
+    return p is not None and p.status == DONE
+
+
+def select_next(phases):
+    by_id = {p.id: p for p in phases}
+    inprog = [p for p in phases if p.status == "in_progress"]
+    if inprog:
+        return sorted(inprog, key=lambda p: (p.order, p.id))[0]
+    eligible = [
+        p
+        for p in phases
+        if p.status == "pending"
+        and p.autonomy == "auto"
+        and all(_dep_done(by_id, d) for d in p.deps)
+    ]
+    if not eligible:
+        return None
+    return sorted(eligible, key=lambda p: (p.order, p.id))[0]
+
+
+def is_complete(phases):
+    return select_next(phases) is None

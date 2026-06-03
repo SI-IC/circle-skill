@@ -51,5 +51,55 @@ class TestParse(unittest.TestCase):
         self.assertEqual(ph.status, "blocked")
 
 
+class TestSelect(unittest.TestCase):
+    def _ph(self, **kw):
+        base = dict(
+            id="x", title="t", status="pending", order=0, deps=[], autonomy="auto"
+        )
+        base.update(kw)
+        return cp.Phase(**base)
+
+    def test_picks_lowest_order_eligible_pending(self):
+        phases = [self._ph(id="b", order=20), self._ph(id="a", order=10)]
+        self.assertEqual(cp.select_next(phases).id, "a")
+
+    def test_skips_phase_with_unmet_deps(self):
+        phases = [self._ph(id="1", status="pending", order=10, deps=["0"])]
+        self.assertIsNone(cp.select_next(phases))
+
+    def test_deps_met_when_done(self):
+        phases = [
+            self._ph(id="1", status="done", order=10),
+            self._ph(id="2", status="pending", order=20, deps=["1"]),
+        ]
+        self.assertEqual(cp.select_next(phases).id, "2")
+
+    def test_skips_needs_human_and_skipped(self):
+        phases = [
+            self._ph(id="1", autonomy="needs-human", order=10),
+            self._ph(id="2", status="skipped", order=20),
+        ]
+        self.assertIsNone(cp.select_next(phases))
+
+    def test_in_progress_takes_priority(self):
+        phases = [
+            self._ph(id="1", status="in_progress", order=99),
+            self._ph(id="2", status="pending", order=1),
+        ]
+        self.assertEqual(cp.select_next(phases).id, "1")
+
+    def test_is_complete_when_nothing_eligible(self):
+        phases = [
+            self._ph(id="1", status="done", order=10),
+            self._ph(id="2", status="blocked", order=20),
+            self._ph(id="3", status="skipped", order=30),
+        ]
+        self.assertTrue(cp.is_complete(phases))
+
+    def test_not_complete_when_pending_eligible(self):
+        phases = [self._ph(id="1", status="pending", order=10)]
+        self.assertFalse(cp.is_complete(phases))
+
+
 if __name__ == "__main__":
     unittest.main()
