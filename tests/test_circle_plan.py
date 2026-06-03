@@ -101,5 +101,54 @@ class TestSelect(unittest.TestCase):
         self.assertFalse(cp.is_complete(phases))
 
 
+class TestWrite(unittest.TestCase):
+    def test_set_status_preserves_other_fields(self):
+        text = (
+            "## Фаза 2 — X\n"
+            '<!-- circle: status=pending order=20 deps=[1] autonomy=auto obstacle="" -->\n'
+            "тело\n"
+        )
+        out = cp.set_status(text, "2", "done")
+        p = {x.id: x for x in cp.parse_phases(out)}["2"]
+        self.assertEqual(p.status, "done")
+        self.assertEqual(p.order, 20)
+        self.assertEqual(p.deps, ["1"])
+
+    def test_set_status_writes_obstacle(self):
+        text = (
+            "## Фаза 2 — X\n"
+            '<!-- circle: status=pending order=20 deps=[] autonomy=auto obstacle="" -->\n'
+        )
+        out = cp.set_status(text, "2", "blocked", obstacle='нет доступа "root"')
+        p = cp.parse_phases(out)[0]
+        self.assertEqual(p.status, "blocked")
+        self.assertEqual(p.obstacle, 'нет доступа "root"')
+
+    def test_set_status_missing_marker_raises(self):
+        text = "## Фаза 2 — X\nтело\n"
+        with self.assertRaises(ValueError):
+            cp.set_status(text, "2", "done")
+
+    def test_add_marker_inserts_under_heading(self):
+        text = "## Фаза 7 — Новая\nтело\n"
+        out = cp.add_marker(
+            text, "7", status="pending", order=70, deps=["1"], autonomy="needs-human"
+        )
+        p = cp.parse_phases(out)[0]
+        self.assertEqual(p.marker_line, 1)
+        self.assertEqual(p.order, 70)
+        self.assertEqual(p.autonomy, "needs-human")
+
+    def test_add_marker_idempotent_overwrites(self):
+        text = (
+            "## Фаза 7 — Новая\n"
+            '<!-- circle: status=pending order=1 deps=[] autonomy=auto obstacle="" -->\n'
+        )
+        out = cp.add_marker(text, "7", status="done", order=70)
+        ph = cp.parse_phases(out)
+        self.assertEqual(len(ph), 1)
+        self.assertEqual(ph[0].status, "done")
+
+
 if __name__ == "__main__":
     unittest.main()

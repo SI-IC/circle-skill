@@ -89,3 +89,51 @@ def select_next(phases):
 
 def is_complete(phases):
     return select_next(phases) is None
+
+
+def _render_marker(status, order, deps, autonomy, obstacle):
+    ob = obstacle.replace('"', '\\"')
+    return (
+        f"<!-- circle: status={status} order={order} "
+        f'deps=[{",".join(deps)}] autonomy={autonomy} obstacle="{ob}" -->'
+    )
+
+
+def _find(phases, phase_id):
+    for p in phases:
+        if p.id == phase_id:
+            return p
+    raise KeyError(f"фаза {phase_id} не найдена")
+
+
+def _reassemble(raw, original_text):
+    out = "\n".join(raw)
+    if original_text.endswith("\n"):
+        out += "\n"
+    return out
+
+
+def set_status(text, phase_id, status, obstacle=None):
+    if status not in VALID_STATUS:
+        raise ValueError(f"недопустимый статус: {status}")
+    raw = text.splitlines()
+    t = _find(parse_phases(text), phase_id)
+    if t.marker_line < 0:
+        raise ValueError(f"у фазы {phase_id} нет circle-маркера (сначала add-marker)")
+    ob = t.obstacle if obstacle is None else obstacle
+    raw[t.marker_line] = _render_marker(status, t.order, t.deps, t.autonomy, ob)
+    return _reassemble(raw, text)
+
+
+def add_marker(
+    text, phase_id, status="pending", order=0, deps=None, autonomy="auto", obstacle=""
+):
+    deps = deps or []
+    raw = text.splitlines()
+    t = _find(parse_phases(text), phase_id)
+    marker = _render_marker(status, order, deps, autonomy, obstacle)
+    if t.marker_line >= 0:
+        raw[t.marker_line] = marker
+    else:
+        raw.insert(t.heading_line + 1, marker)
+    return _reassemble(raw, text)
