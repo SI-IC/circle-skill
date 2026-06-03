@@ -30,6 +30,10 @@ def main():
         os.system(f"{sys.executable} {plan_cli} set-status {plan} {phase} done")
         with open(plan, "a", encoding="utf-8") as f:
             f.write(f"\n### fake: фаза {phase} выполнена\n")
+    elif mode == "churn":
+        os.system(f"{sys.executable} {plan_cli} set-status {plan} {phase} in_progress")
+        with open(plan, "a", encoding="utf-8") as f:
+            f.write(f"\n### churn {phase} {os.urandom(4).hex()}\n")
     # mode == "nothing": план не трогаем (эмуляция зависшей-без-прогресса сессии)
 
     # сигнал циклу

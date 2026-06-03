@@ -13,7 +13,7 @@ PLAN = (
 )
 
 
-def run_loop(plan_path, fake_mode, timeout="5"):
+def run_loop(plan_path, fake_mode, timeout="5", extra_env=None):
     env = dict(os.environ)
     env["FAKE_MODE"] = fake_mode
     env["CIRCLE_TIMEOUT"] = timeout
@@ -24,6 +24,8 @@ def run_loop(plan_path, fake_mode, timeout="5"):
         f.write(f'#!/usr/bin/env bash\nexec "{sys.executable}" "{FAKE}" "$@"\n')
     os.chmod(wrapper, 0o755)
     env["CIRCLE_CLAUDE_BIN"] = wrapper
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         ["bash", LOOP, plan_path], env=env, capture_output=True, text=True, timeout=120
     )
@@ -67,6 +69,12 @@ class TestLoopIntegration(unittest.TestCase):
         run_loop(plan, "hang", timeout="2")
         s = self._summary(plan)
         self.assertIn("STOP_REASON=hang", s)
+
+    def test_stops_when_stuck_on_same_phase(self):
+        plan = self._plan()
+        run_loop(plan, "churn", extra_env={"CIRCLE_MAX_SAME_PHASE": "2"})
+        s = self._summary(plan)
+        self.assertIn("STOP_REASON=stuck", s)
 
 
 if __name__ == "__main__":
