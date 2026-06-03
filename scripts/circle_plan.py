@@ -2,10 +2,12 @@
 """circle-skill: парсинг фазового плана, выбор фазы, статусы, сводка."""
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 HEADING_RE = re.compile(r"^##\s+Фаза\s+(\S+)\s+[—-]\s+(.+?)\s*$")
 MARKER_RE = re.compile(r"<!--\s*circle:\s*(.*?)\s*-->")
+_MARKER_SEARCH_LINES = 5  # маркер должен быть в пределах N строк после заголовка фазы
 
 DONE = "done"
 VALID_STATUS = {"pending", "in_progress", "done", "blocked", "skipped"}
@@ -47,7 +49,7 @@ def parse_phases(text: str) -> list:
         if not hm:
             continue
         ph = Phase(id=hm.group(1), title=hm.group(2), heading_line=i)
-        for j in range(i + 1, min(i + 4, len(lines))):
+        for j in range(i + 1, min(i + 1 + _MARKER_SEARCH_LINES, len(lines))):
             if HEADING_RE.match(lines[j]):
                 break
             mm = MARKER_RE.search(lines[j])
@@ -66,6 +68,8 @@ def parse_phases(text: str) -> list:
 
 
 def _dep_done(by_id, dep):
+    # Зависимость удовлетворена только статусом done. Если предшественник skipped/blocked,
+    # зависимая фаза намеренно не выбирается (остаётся pending → попадёт в сводку).
     p = by_id.get(dep)
     return p is not None and p.status == DONE
 
@@ -84,10 +88,14 @@ def select_next(phases):
     ]
     if not eligible:
         return None
+    # order — авторитетный ключ сортировки; при равном order id сравнивается лексикографически.
     return sorted(eligible, key=lambda p: (p.order, p.id))[0]
 
 
 def is_complete(phases):
+    """True, когда нет авто-подходящей фазы для следующего шага.
+    Это НЕ значит, что все фазы done: план, где остаток — blocked/skipped/needs-human,
+    тоже complete (циклу больше нечего делать автономно)."""
     return select_next(phases) is None
 
 
@@ -107,9 +115,10 @@ def _find(phases, phase_id):
 
 
 def _reassemble(raw, original_text):
-    out = "\n".join(raw)
+    sep = "\r\n" if "\r\n" in original_text else "\n"
+    out = sep.join(raw)
     if original_text.endswith("\n"):
-        out += "\n"
+        out += sep
     return out
 
 
@@ -137,9 +146,6 @@ def add_marker(
     else:
         raw.insert(t.heading_line + 1, marker)
     return _reassemble(raw, text)
-
-
-from collections import Counter
 
 
 def summary(phases):
@@ -218,58 +224,63 @@ def main(argv=None):
     sp.add_argument("--obstacle", default="")
     a = ap.parse_args(argv)
 
-    phases = parse_phases(_read(a.plan))
-    if a.cmd == "next":
-        nxt = select_next(phases)
-        print("NONE" if nxt is None else f"{nxt.id}\t{nxt.title}")
-        return 0
-    if a.cmd == "complete":
-        return 0 if is_complete(phases) else 1
-    if a.cmd == "summary":
-        s = summary(phases)
-        if getattr(a, "json", False):
-            print(json.dumps(s, ensure_ascii=False, indent=2))
-        else:
+    try:
+        phases = parse_phases(_read(a.plan))
+        if a.cmd == "next":
+            nxt = select_next(phases)
+            print("NONE" if nxt is None else f"{nxt.id}\t{nxt.title}")
+            return 0
+        if a.cmd == "complete":
+            return 0 if is_complete(phases) else 1
+        if a.cmd == "summary":
+            s = summary(phases)
+            if getattr(a, "json", False):
+                print(json.dumps(s, ensure_ascii=False, indent=2))
+            else:
+                print(
+                    f"Всего фаз: {s['total']}  |  "
+                    + "  ".join(f"{k}={v}" for k, v in sorted(s["counts"].items()))
+                )
+                for b in s["blocked"]:
+                    print(f"  blocked  {b['id']} — {b['title']}: {b['obstacle']}")
+                for b in s["skipped"]:
+                    print(f"  skipped  {b['id']} — {b['title']}")
+            return 0
+        if a.cmd == "phases":
+            data = [_phase_dict(p) for p in phases]
             print(
-                f"Всего фаз: {s['total']}  |  "
-                + "  ".join(f"{k}={v}" for k, v in sorted(s["counts"].items()))
+                json.dumps(data, ensure_ascii=False, indent=2)
+                if a.json
+                else "\n".join(
+                    f"{p['id']}\t{p['status']}\t{p['autonomy']}\t{p['title']}"
+                    for p in data
+                )
             )
-            for b in s["blocked"]:
-                print(f"  blocked  {b['id']} — {b['title']}: {b['obstacle']}")
-            for b in s["skipped"]:
-                print(f"  skipped  {b['id']} — {b['title']}")
-        return 0
-    if a.cmd == "phases":
-        data = [_phase_dict(p) for p in phases]
-        print(
-            json.dumps(data, ensure_ascii=False, indent=2)
-            if a.json
-            else "\n".join(
-                f"{p['id']}\t{p['status']}\t{p['autonomy']}\t{p['title']}" for p in data
+            return 0
+        if a.cmd == "set-status":
+            _write_file(
+                a.plan, set_status(_read(a.plan), a.id, a.status, obstacle=a.obstacle)
             )
-        )
-        return 0
-    if a.cmd == "set-status":
-        _write_file(
-            a.plan, set_status(_read(a.plan), a.id, a.status, obstacle=a.obstacle)
-        )
-        return 0
-    if a.cmd == "add-marker":
-        deps = [x.strip() for x in a.deps.split(",") if x.strip()]
-        _write_file(
-            a.plan,
-            add_marker(
-                _read(a.plan),
-                a.id,
-                status=a.status,
-                order=a.order,
-                deps=deps,
-                autonomy=a.autonomy,
-                obstacle=a.obstacle,
-            ),
-        )
-        return 0
-    return 2
+            return 0
+        if a.cmd == "add-marker":
+            deps = [x.strip() for x in a.deps.split(",") if x.strip()]
+            _write_file(
+                a.plan,
+                add_marker(
+                    _read(a.plan),
+                    a.id,
+                    status=a.status,
+                    order=a.order,
+                    deps=deps,
+                    autonomy=a.autonomy,
+                    obstacle=a.obstacle,
+                ),
+            )
+            return 0
+        return 2
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        print(f"circle_plan: ошибка: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

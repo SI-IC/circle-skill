@@ -74,10 +74,18 @@ class TestSelect(unittest.TestCase):
         ]
         self.assertEqual(cp.select_next(phases).id, "2")
 
-    def test_skips_needs_human_and_skipped(self):
+    def test_skips_needs_human(self):
+        phases = [self._ph(id="1", autonomy="needs-human", order=10)]
+        self.assertIsNone(cp.select_next(phases))
+
+    def test_skips_skipped_status(self):
+        phases = [self._ph(id="2", status="skipped", order=20)]
+        self.assertIsNone(cp.select_next(phases))
+
+    def test_dep_on_skipped_keeps_dependent_unselected(self):
         phases = [
-            self._ph(id="1", autonomy="needs-human", order=10),
-            self._ph(id="2", status="skipped", order=20),
+            self._ph(id="1", status="skipped", order=10),
+            self._ph(id="2", status="pending", order=20, deps=["1"]),
         ]
         self.assertIsNone(cp.select_next(phases))
 
@@ -149,6 +157,17 @@ class TestWrite(unittest.TestCase):
         self.assertEqual(len(ph), 1)
         self.assertEqual(ph[0].status, "done")
 
+    def test_set_status_preserves_crlf(self):
+        text = (
+            "## Фаза 2 — X\r\n"
+            '<!-- circle: status=pending order=20 deps=[] autonomy=auto obstacle="" -->\r\n'
+            "тело\r\n"
+        )
+        out = cp.set_status(text, "2", "done")
+        self.assertIn("\r\n", out)
+        self.assertNotIn("\n\n", out.replace("\r\n", ""))  # no stray bare LF introduced
+        self.assertEqual(cp.parse_phases(out)[0].status, "done")
+
 
 import json
 import subprocess
@@ -204,7 +223,8 @@ class TestSummaryCLI(unittest.TestCase):
 
     def test_cli_set_status_roundtrip(self):
         path = self._write(self.PLAN)
-        self._cli("set-status", path, "3", "done")
+        r = self._cli("set-status", path, "3", "done")
+        self.assertEqual(r.returncode, 0, r.stderr)
         with open(path, encoding="utf-8") as fh:
             p = {x.id: x for x in cp.parse_phases(fh.read())}
         self.assertEqual(p["3"].status, "done")
@@ -215,6 +235,11 @@ class TestSummaryCLI(unittest.TestCase):
         data = json.loads(r.stdout)
         self.assertEqual(len(data), 3)
         self.assertEqual(data[0]["id"], "1")
+
+    def test_cli_missing_file_returns_1(self):
+        r = self._cli("next", "/nonexistent/plan-xyz.md")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ошибка", r.stderr)
 
 
 if __name__ == "__main__":
