@@ -48,6 +48,16 @@ class TestRunPhase(unittest.TestCase):
         r = run(self.result, 10, cmd)
         self.assertEqual(r.returncode, 3)
 
+    def test_returns_0_when_result_written_then_child_exits_fast(self):
+        # Процесс пишет result и СРАЗУ выходит — не должно быть спурьёзного rc=3.
+        cmd = [
+            sys.executable,
+            "-c",
+            f"open({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')",
+        ]
+        r = run(self.result, 10, cmd)
+        self.assertEqual(r.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

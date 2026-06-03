@@ -19,6 +19,11 @@ def _terminate(pid):
             if wpid == pid:
                 return
             time.sleep(0.1)
+    # SIGKILL was delivered; ensure the child is reaped (no zombie) with a blocking wait.
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
 
 
 def _result_ready(path):
@@ -62,6 +67,8 @@ def main(argv=None):
     child_alive = True
     try:
         while True:
+            # PTY-буфер дренируем всегда (os.read ниже), иначе «болтливый» дочерний процесс
+            # (реальный claude) заблокируется на записи в полный буфер. В лог пишем только при --log.
             try:
                 r, _, _ = select.select([fd], [], [], a.poll)
             except (OSError, ValueError):
@@ -83,7 +90,13 @@ def main(argv=None):
                 wpid = pid
             if wpid == pid:
                 child_alive = False
-                rc = 0 if _result_ready(a.result) else 3
+                # Грейс: процесс мог записать result и сразу выйти — дать файлу появиться/наполниться.
+                rc = 3
+                for _ in range(10):
+                    if _result_ready(a.result):
+                        rc = 0
+                        break
+                    time.sleep(0.05)
                 break
             if time.monotonic() - start > a.timeout:
                 rc = 2
