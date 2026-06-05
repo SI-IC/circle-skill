@@ -35,7 +35,9 @@ class TestManifests(unittest.TestCase):
             os.path.join(d, ".claude-plugin", "plugin.json"), "w", encoding="utf-8"
         ) as f:
             json.dump({"name": "circle-skill", "version": version}, f)
-        with open(os.path.join(d, "marketplace.json"), "w", encoding="utf-8") as f:
+        with open(
+            os.path.join(d, ".claude-plugin", "marketplace.json"), "w", encoding="utf-8"
+        ) as f:
             json.dump(
                 {
                     "name": "circle-skill",
@@ -63,7 +65,9 @@ class TestManifests(unittest.TestCase):
             os.path.join(d, ".claude-plugin", "plugin.json"), encoding="utf-8"
         ) as f:
             pj = json.load(f)
-        with open(os.path.join(d, "marketplace.json"), encoding="utf-8") as f:
+        with open(
+            os.path.join(d, ".claude-plugin", "marketplace.json"), encoding="utf-8"
+        ) as f:
             mj = json.load(f)
         self.assertEqual(pj["version"], "0.1.1")
         self.assertEqual(mj["plugins"][0]["version"], "0.1.1")

@@ -37,7 +37,7 @@ claude plugin install circle-skill@circle-skill
 
 ## Версионирование и релиз
 
-Версия живёт в `.claude-plugin/plugin.json` и зеркалится в `marketplace.json` (значения обязаны
+Версия живёт в `.claude-plugin/plugin.json` и зеркалится в `.claude-plugin/marketplace.json` (значения обязаны
 совпадать — это проверяет `claude plugin tag`). Версия семвер `MAJOR.MINOR.PATCH`.
 
 **Правило: каждый push ветки `main` поднимает версию.** Релиз делается одной командой — она

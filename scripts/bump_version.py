@@ -13,7 +13,7 @@ import os
 import sys
 
 PLUGIN = ".claude-plugin/plugin.json"
-MARKET = "marketplace.json"
+MARKET = ".claude-plugin/marketplace.json"
 PLUGIN_NAME = "circle-skill"
 
 

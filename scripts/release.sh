@@ -25,7 +25,7 @@ NEWV="$("$PY" scripts/bump_version.py "$LEVEL")"
 TAG="circle-skill--v$NEWV"
 echo "release: версия → $NEWV ($TAG)"
 
-git add .claude-plugin/plugin.json marketplace.json
+git add .claude-plugin/plugin.json .claude-plugin/marketplace.json
 git commit -m "chore(release): v$NEWV"
 
 # Сначала пушим ветку (на этот момент тега $TAG ещё нет — pre-push видит cur > последний тег),

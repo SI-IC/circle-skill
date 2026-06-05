@@ -18,7 +18,7 @@
 ## Правила
 
 - **Версия поднимается при каждом push `main`.** Релизь через `./scripts/release.sh [patch|minor|major]`
-  — он поднимает версию в `.claude-plugin/plugin.json` И `marketplace.json` (значения обязаны совпадать),
+  — он поднимает версию в `.claude-plugin/plugin.json` И `.claude-plugin/marketplace.json` (значения обязаны совпадать),
   коммитит, пушит ветку и ставит тег `circle-skill--vX.Y.Z`. Прямой `git push origin main` без поднятой
   версии блокируется хуком `.githooks/pre-push` (обход: `--no-verify`). После клона: `git config core.hooksPath .githooks`.
 - **Тесты — stdlib `unittest`, ноль внешних зависимостей.** Прогон: `python3 -m unittest discover -s tests`.
