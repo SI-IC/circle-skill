@@ -43,6 +43,99 @@ class TestRunPhase(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertLess(time.monotonic() - t0, 15)
 
+    def test_hard_deadline_fires_when_blocked_past_timeout(self):
+        # Жёсткий watchdog: если главный цикл заблокирован в syscall (здесь — select
+        # на большом --poll при молчаливом живом ребёнке) дольше --timeout, run_phase
+        # ВСЁ РАВНО обязан вернуть rc=2 за ~timeout+grace, а не висеть ~poll секунд.
+        # Это тот же класс бага, что висящий os.waitpid (стек подтвердил блок в __wait4).
+        cmd = [sys.executable, "-c", "import time;time.sleep(20)"]
+        t0 = time.monotonic()
+        r = subprocess.run(
+            [
+                sys.executable,
+                SCRIPT,
+                "--result",
+                self.result,
+                "--timeout",
+                "1",
+                "--poll",
+                "20",
+                "--",
+                *cmd,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        dt = time.monotonic() - t0
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertLess(dt, 15)  # дедлайн timeout(1)+grace ≈ 9s, не ~20s poll
+
+    def test_returns_2_when_child_ignores_sigterm(self):
+        # Ребёнок игнорирует SIGTERM и непрерывно пишет в PTY. _terminate обязан
+        # эскалировать до SIGKILL и завершиться за разумное время, не зависнув.
+        src = (
+            "import signal,sys,time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "while True:\n"
+            "    sys.stdout.write('x'); sys.stdout.flush(); time.sleep(0.01)\n"
+        )
+        cmd = [sys.executable, "-c", src]
+        t0 = time.monotonic()
+        r = run(self.result, 1, cmd)
+        dt = time.monotonic() - t0
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertLess(dt, 15)
+
+    def test_log_captures_pty_output_and_is_closed_on_timeout(self):
+        # --log должен наполняться выводом ребёнка и корректно закрываться даже при rc=2.
+        log = os.path.join(self.d, "loop.log")
+        cmd = [
+            sys.executable,
+            "-u",
+            "-c",
+            "import time\nwhile True:\n print('TICK'); time.sleep(0.1)",
+        ]
+        r = subprocess.run(
+            [
+                sys.executable,
+                SCRIPT,
+                "--result",
+                self.result,
+                "--timeout",
+                "1",
+                "--log",
+                log,
+                "--",
+                *cmd,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        with open(log, "rb") as fh:
+            self.assertIn(b"TICK", fh.read())
+
+    def test_rejects_non_finite_timeout(self):
+        cmd = [sys.executable, "-c", "pass"]
+        r = subprocess.run(
+            [
+                sys.executable,
+                SCRIPT,
+                "--result",
+                self.result,
+                "--timeout",
+                "nan",
+                "--",
+                *cmd,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(r.returncode, 4)
+
     def test_returns_3_when_child_exits_without_result(self):
         cmd = [sys.executable, "-c", "import sys;sys.exit(0)"]
         r = run(self.result, 10, cmd)

@@ -174,6 +174,41 @@ import subprocess
 import tempfile
 
 
+class TestJournal(unittest.TestCase):
+    PLAN = (
+        "## Фаза 1 — A\n"
+        '<!-- circle: status=done order=10 deps=[] autonomy=auto obstacle="" -->\n'
+        "тело\n\n"
+        "## Журнал\n\n"
+        "### Фаза 1 — A — 2026-06-05\n"
+        "- сделал X; verify зелёный.\n"
+        "- Следующий шаг: Фаза 2.\n"
+    )
+
+    def test_extracts_journal_body(self):
+        body = cp.journal_section(self.PLAN)
+        self.assertIn("### Фаза 1 — A", body)
+        self.assertIn("Следующий шаг: Фаза 2", body)
+
+    def test_journal_excludes_heading_and_phase_bodies(self):
+        body = cp.journal_section(self.PLAN)
+        self.assertNotIn("## Журнал", body)  # сам заголовок секции не включаем
+        self.assertNotIn("тело", body)  # тело фазы выше журнала не попадает
+
+    def test_no_journal_returns_empty(self):
+        text = "## Фаза 1 — A\nтело\n"
+        self.assertEqual(cp.journal_section(text), "")
+
+    def test_empty_input_returns_empty(self):
+        self.assertEqual(cp.journal_section(""), "")
+
+    def test_journal_stops_at_next_level2_heading(self):
+        text = "## Журнал\n### Фаза 1 — A\nзапись.\n## Прочее\nне журнал.\n"
+        body = cp.journal_section(text)
+        self.assertIn("запись.", body)
+        self.assertNotIn("не журнал.", body)
+
+
 class TestSummaryCLI(unittest.TestCase):
     PLAN = (
         "## Фаза 1 — A\n"
@@ -240,6 +275,22 @@ class TestSummaryCLI(unittest.TestCase):
         r = self._cli("next", "/nonexistent/plan-xyz.md")
         self.assertEqual(r.returncode, 1)
         self.assertIn("ошибка", r.stderr)
+
+    def test_cli_journal_prints_body(self):
+        path = self._write(
+            self.PLAN
+            + "## Журнал\n\n### Фаза 1 — A — 2026-06-05\n- готово; следующий шаг: Фаза 3.\n"
+        )
+        r = self._cli("journal", path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("следующий шаг: Фаза 3", r.stdout)
+        self.assertNotIn("## Журнал", r.stdout)
+
+    def test_cli_journal_empty_when_absent(self):
+        path = self._write(self.PLAN)  # без секции Журнал
+        r = self._cli("journal", path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
 
 
 if __name__ == "__main__":

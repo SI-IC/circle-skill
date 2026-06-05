@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 HEADING_RE = re.compile(r"^##\s+Фаза\s+(\S+)\s+[—-]\s+(.+?)\s*$")
 MARKER_RE = re.compile(r"<!--\s*circle:\s*(.*?)\s*-->")
+JOURNAL_RE = re.compile(r"^##\s+Журнал\s*$")
 _MARKER_SEARCH_LINES = 5  # маркер должен быть в пределах N строк после заголовка фазы
 
 DONE = "done"
@@ -65,6 +66,21 @@ def parse_phases(text: str) -> list:
                 break
         phases.append(ph)
     return phases
+
+
+def journal_section(text: str) -> str:
+    """Тело секции «## Журнал» (без самого заголовка): от неё до следующего
+    заголовка уровня `## ` или конца файла. Пусто, если секции нет.
+    Записи фаз — уровня `###`, поэтому остаются внутри. Это дешёвый дайджест
+    для следующей фазы: что построено и какие предупреждения оставили предыдущие."""
+    lines = text.splitlines()
+    start = next((i + 1 for i, ln in enumerate(lines) if JOURNAL_RE.match(ln)), None)
+    if start is None:
+        return ""
+    end = next(
+        (j for j in range(start, len(lines)) if lines[j].startswith("## ")), len(lines)
+    )
+    return "\n".join(lines[start:end]).strip()
 
 
 def _dep_done(by_id, dep):
@@ -204,7 +220,7 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(prog="circle_plan")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("next", "complete", "summary", "phases"):
+    for name in ("next", "complete", "summary", "phases", "journal"):
         sp = sub.add_parser(name)
         sp.add_argument("plan")
         if name in ("summary", "phases"):
@@ -225,13 +241,19 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     try:
-        phases = parse_phases(_read(a.plan))
+        text = _read(a.plan)  # один раз: согласованный снимок для всех команд чтения
+        phases = parse_phases(text)
         if a.cmd == "next":
             nxt = select_next(phases)
             print("NONE" if nxt is None else f"{nxt.id}\t{nxt.title}")
             return 0
         if a.cmd == "complete":
             return 0 if is_complete(phases) else 1
+        if a.cmd == "journal":
+            body = journal_section(text)
+            if body:
+                print(body)
+            return 0
         if a.cmd == "summary":
             s = summary(phases)
             if getattr(a, "json", False):
