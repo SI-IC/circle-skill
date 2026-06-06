@@ -2,11 +2,62 @@
 """Запускает команду (интерактивный claude) под PTY; ждёт появления файла-результата,
 затем убивает процесс. Коды: 0=result появился, 2=таймаут, 3=процесс вышел без result."""
 
-import argparse, math, os, select, signal, sys, time
+import argparse, math, os, re, select, signal, sys, time
 
 # Запас поверх --timeout для жёсткого SIGALRM-дедлайна: страхует от блокировки в
 # любом syscall главного цикла (select/read/waitpid), которую мягкая проверка не ловит.
 _GRACE = 8
+
+# ANSI/управляющие коды для чистки PTY-вывода перед записью в лог.
+_ANSI_RE = re.compile(
+    rb"\x1b\[[0-9;?]*[ -/]*[@-~]"  # CSI: \e[ ... финальный байт (цвета, перемещение курсора)
+    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: \e] ... BEL|ST (заголовки окна)
+    rb"|\x1b[PX^_][^\x1b]*\x1b\\"  # DCS/SOS/PM/APC ... ST
+    rb"|\x1b[\x20-\x2f]*[\x30-\x7e]"  # двухсимвольные esc (\e(, \e= и пр.)
+    rb"|[\x00-\x08\x0b-\x1f\x7f]"  # прочие control-байты (кроме \t=09 и \n=0a)
+)
+
+
+class _LogFilter:
+    r"""Чистит сырой PTY-вывод перед записью в лог. Интерактивный claude рисует TUI и
+    перерисовывает экран десятки раз/сек (спиннеры, прогресс), отчего сырой лог раздут
+    в разы и почти не грепается (в реальном прогоне — 7.4 МБ при всего 38 `\n`: весь TUI
+    идёт `\r`-перерисовками).
+
+    Подход НЕ теряющий нарратив (тот же, по которому делается ручной анализ прогонов):
+    и `\r`, и `\n` трактуются как граница кадра; каждый кадр чистится от ANSI/control-кодов;
+    выкидываются только пустые и подряд идущие ОДИНАКОВЫЕ кадры (анимация спиннера). Все
+    содержательно отличающиеся кадры сохраняются — лог остаётся пригодным для пост-мортема."""
+
+    _MAX_FRAME = 1 << 20  # страховка: кадр без терминатора не должен расти бесконечно
+
+    def __init__(self, fh):
+        self.fh = fh
+        self.buf = b""
+        self.last = None
+
+    def feed(self, data):
+        self.buf += data
+        parts = re.split(rb"[\r\n]", self.buf)
+        self.buf = parts.pop()  # хвост без терминатора — ждём продолжения в след. чанке
+        for frame in parts:
+            self._emit(frame)
+        if len(self.buf) > self._MAX_FRAME:  # очень длинный кадр без \r/\n — сбрасываем
+            self._emit(self.buf)
+            self.buf = b""
+
+    def _emit(self, frame):
+        clean = _ANSI_RE.sub(b"", frame).rstrip()
+        if not clean or clean == self.last:  # пустые / подряд-дубли кадров — пропускаем
+            return
+        self.last = clean
+        self.fh.write(clean + b"\n")
+        self.fh.flush()
+
+    def flush(self):
+        if self.buf:
+            self._emit(self.buf)
+            self.buf = b""
 
 
 def _reap_bounded(pid, attempts):
@@ -99,6 +150,7 @@ def main(argv=None):
         os._exit(127)
 
     logf = open(a.log, "ab") if a.log else None
+    logfilter = _LogFilter(logf) if logf else None
     start = time.monotonic()
     rc = 0
     child_alive = True
@@ -127,9 +179,8 @@ def main(argv=None):
                     data = os.read(fd, 65536)
                 except OSError:
                     data = b""
-                if data and logf:
-                    logf.write(data)
-                    logf.flush()
+                if data and logfilter:
+                    logfilter.feed(data)
             if _result_ready(a.result):
                 rc = 0
                 break
@@ -159,6 +210,8 @@ def main(argv=None):
         signal.signal(signal.SIGALRM, old_handler)
         if child_alive:
             _terminate(pid)
+        if logfilter:
+            logfilter.flush()
         if logf:
             logf.close()
         try:

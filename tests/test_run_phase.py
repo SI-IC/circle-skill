@@ -1,6 +1,8 @@
-import os, sys, subprocess, tempfile, time, unittest
+import io, os, sys, subprocess, tempfile, time, unittest
 
 SCRIPT = os.path.join(os.path.dirname(__file__), "..", "scripts", "run_phase.py")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+import run_phase as rp
 
 
 def run(result, timeout, cmd):
@@ -150,6 +152,69 @@ class TestRunPhase(unittest.TestCase):
         ]
         r = run(self.result, 10, cmd)
         self.assertEqual(r.returncode, 0)
+
+
+class TestLogFilter(unittest.TestCase):
+    def _run(self, *chunks):
+        buf = io.BytesIO()
+        f = rp._LogFilter(buf)
+        for c in chunks:
+            f.feed(c)
+        f.flush()
+        return buf.getvalue()
+
+    def test_strips_ansi_colors(self):
+        out = self._run(b"\x1b[31mhello\x1b[0m\n")
+        self.assertEqual(out, b"hello\n")
+
+    def test_carriage_return_is_frame_boundary(self):
+        # Каждый отличающийся кадр сохраняется (нарратив не теряем), не только последний.
+        out = self._run(b"1%\r2%\r3%\n")
+        self.assertEqual(out, b"1%\n2%\n3%\n")
+
+    def test_crlf_does_not_emit_empty_frame(self):
+        out = self._run(b"TICK\r\n")
+        self.assertEqual(out, b"TICK\n")  # \r\n → один кадр, пустой хвост выкинут
+
+    def test_collapses_consecutive_duplicate_frames(self):
+        out = self._run(b"TICK\nTICK\nTICK\n")
+        self.assertEqual(out, b"TICK\n")  # подряд идущие дубли схлопнуты
+
+    def test_collapses_repeated_spinner_frames(self):
+        out = self._run(b"working\rworking\rworking\rdone\n")
+        self.assertEqual(out, b"working\ndone\n")  # анимация спиннера → один кадр
+
+    def test_keeps_non_consecutive_repeats(self):
+        out = self._run(b"a\nb\na\n")
+        self.assertEqual(out, b"a\nb\na\n")  # дедуп только соседних кадров
+
+    def test_drops_empty_and_whitespace_frames(self):
+        out = self._run(b"\x1b[2K\n   \n\thi\n")
+        self.assertEqual(
+            out, b"\thi\n"
+        )  # пустые/пробельные кадры выкинуты, \t сохранён
+
+    def test_buffers_partial_line_until_newline(self):
+        out = self._run(b"par", b"tial line\n")
+        self.assertEqual(out, b"partial line\n")
+
+    def test_flush_emits_trailing_line_without_newline(self):
+        out = self._run(b"no newline at end")
+        self.assertEqual(out, b"no newline at end\n")
+
+    def test_oversized_frame_without_terminator_is_flushed_not_lost(self):
+        # Страховка _MAX_FRAME: очень длинный кадр без \r/\n не копится бесконечно,
+        # данные не теряются, буфер опустошается.
+        big = b"A" * (rp._LogFilter._MAX_FRAME + 10)
+        buf = io.BytesIO()
+        f = rp._LogFilter(buf)
+        f.feed(big)
+        self.assertEqual(f.buf, b"")  # буфер сброшен страховкой
+        self.assertIn(b"A" * 1000, buf.getvalue())  # данные не потеряны
+
+    def test_strips_osc_title_sequence(self):
+        out = self._run(b"\x1b]0;window title\x07prompt\n")
+        self.assertEqual(out, b"prompt\n")
 
 
 if __name__ == "__main__":

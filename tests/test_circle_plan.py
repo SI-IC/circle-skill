@@ -209,6 +209,99 @@ class TestJournal(unittest.TestCase):
         self.assertNotIn("не журнал.", body)
 
 
+class TestPhaseSlice(unittest.TestCase):
+    PLAN = (
+        "# Заголовок плана\n\n"
+        "Goal: построить X.\n\n"
+        "## Conventions (read once)\n"
+        "Общие правила, нужные каждой фазе.\n\n"
+        "## Фаза 1 — A\n"
+        '<!-- circle: status=done order=10 deps=[] autonomy=auto obstacle="" -->\n'
+        "Тело фазы 1 — детали реализации.\n\n"
+        "## Фаза 2 — B\n"
+        '<!-- circle: status=pending order=20 deps=[1] autonomy=auto obstacle="" -->\n'
+        "Тело фазы 2 — детали.\n\n"
+        "## Журнал\n\n"
+        "### Фаза 1 — A\n- сделал X; следующий шаг: Фаза 2.\n"
+    )
+
+    def test_includes_preamble_phase_body_and_journal(self):
+        s = cp.phase_slice(self.PLAN, "2")
+        self.assertIn("Goal: построить X.", s)  # преамбула
+        self.assertIn("Общие правила", s)  # read-once Conventions
+        self.assertIn("Тело фазы 2 — детали.", s)  # тело назначенной фазы
+        self.assertIn("следующий шаг: Фаза 2", s)  # журнал
+
+    def test_excludes_other_phase_bodies(self):
+        s = cp.phase_slice(self.PLAN, "2")
+        self.assertNotIn("Тело фазы 1 — детали", s)  # чужая фаза в срез не попадает
+
+    def test_phase_heading_and_marker_present(self):
+        s = cp.phase_slice(self.PLAN, "2")
+        self.assertIn("## Фаза 2 — B", s)
+        self.assertIn("status=pending", s)
+
+    def test_no_journal_section_ok(self):
+        text = (
+            "Преамбула.\n\n"
+            "## Фаза 1 — A\n"
+            '<!-- circle: status=pending order=10 deps=[] autonomy=auto obstacle="" -->\n'
+            "тело.\n"
+        )
+        s = cp.phase_slice(text, "1")
+        self.assertIn("Преамбула.", s)
+        self.assertIn("тело.", s)
+        self.assertNotIn("Журнал предыдущих фаз", s)
+
+    def test_missing_phase_raises(self):
+        with self.assertRaises(KeyError):
+            cp.phase_slice(self.PLAN, "99")
+
+    def test_crlf_input_slice_is_parseable(self):
+        # phase-context.md — одноразовый файл для чтения моделью, не пишется обратно в план,
+        # поэтому байтовая идентичность CRLF не требуется; важно лишь что срез корректен.
+        s = cp.phase_slice(self.PLAN.replace("\n", "\r\n"), "2")
+        self.assertIn("Тело фазы 2", s)
+        self.assertIn("Goal: построить X.", s)
+        self.assertNotIn("Тело фазы 1 — детали", s)
+
+    def test_cli_phase_slice(self):
+        f = tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        )
+        f.write(self.PLAN)
+        f.close()
+        script = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "circle_plan.py"
+        )
+        r = subprocess.run(
+            [sys.executable, script, "phase-slice", f.name, "2"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Тело фазы 2", r.stdout)
+        self.assertIn("Goal: построить X.", r.stdout)
+        self.assertNotIn("Тело фазы 1 — детали", r.stdout)
+
+    def test_cli_phase_slice_missing_phase_returns_1(self):
+        f = tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        )
+        f.write(self.PLAN)
+        f.close()
+        script = os.path.join(
+            os.path.dirname(__file__), "..", "scripts", "circle_plan.py"
+        )
+        r = subprocess.run(
+            [sys.executable, script, "phase-slice", f.name, "99"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("ошибка", r.stderr)
+
+
 class TestSummaryCLI(unittest.TestCase):
     PLAN = (
         "## Фаза 1 — A\n"

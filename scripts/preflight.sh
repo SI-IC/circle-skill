@@ -23,5 +23,5 @@ fi
 
 echo "CIRCLE_PREFLIGHT: OK"
 echo "PLAN=$PLAN"
-echo "WORK=$(dirname "$PLAN")/.circle"
+echo "WORK=$(dirname "$PLAN")/.circle/$(basename "$PLAN" .md)"
 echo "claude=$(command -v claude)  python3=$(command -v python3)"

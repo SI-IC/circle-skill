@@ -83,6 +83,38 @@ def journal_section(text: str) -> str:
     return "\n".join(lines[start:end]).strip()
 
 
+def phase_slice(text: str, phase_id: str) -> str:
+    """Ограниченный срез плана для одной фазы — чтобы фаза-сессия читала ОДИН компактный
+    файл, а не навигировала по всему плану (часто 100+ КБ). Склеивает:
+      1. read-once преамбулу — всё до первого заголовка фазы (Goal/Architecture/
+         Conventions/список фаз): общий контекст, который нужен каждой фазе;
+      2. полный текст самой фазы — от её заголовка до следующего `## ` заголовка;
+      3. дайджест секции «## Журнал» — заметки предыдущих фаз.
+    Полный план остаётся на диске как fallback, если среза не хватит."""
+    lines = text.splitlines()
+    phases = parse_phases(text)
+    t = _find(phases, phase_id)
+    first_heading = min((p.heading_line for p in phases), default=len(lines))
+    preamble = "\n".join(lines[:first_heading]).strip()
+    end = next(
+        (
+            j
+            for j in range(t.heading_line + 1, len(lines))
+            if lines[j].startswith("## ")
+        ),
+        len(lines),
+    )
+    body = "\n".join(lines[t.heading_line : end]).strip()
+    journal = journal_section(text)
+    parts = []
+    if preamble:
+        parts.append(preamble)
+    parts.append(body)
+    if journal:
+        parts.append("## Журнал предыдущих фаз (контекст)\n\n" + journal)
+    return "\n\n".join(parts) + "\n"
+
+
 def _dep_done(by_id, dep):
     # Зависимость удовлетворена только статусом done. Если предшественник skipped/blocked,
     # зависимая фаза намеренно не выбирается (остаётся pending → попадёт в сводку).
@@ -225,6 +257,9 @@ def main(argv=None):
         sp.add_argument("plan")
         if name in ("summary", "phases"):
             sp.add_argument("--json", action="store_true")
+    sp = sub.add_parser("phase-slice")
+    sp.add_argument("plan")
+    sp.add_argument("id")
     sp = sub.add_parser("set-status")
     sp.add_argument("plan")
     sp.add_argument("id")
@@ -253,6 +288,9 @@ def main(argv=None):
             body = journal_section(text)
             if body:
                 print(body)
+            return 0
+        if a.cmd == "phase-slice":
+            print(phase_slice(text, a.id), end="")
             return 0
         if a.cmd == "summary":
             s = summary(phases)

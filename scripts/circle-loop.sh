@@ -14,13 +14,25 @@ PLAN_CLI="$PLUGIN_ROOT/scripts/circle_plan.py"
 RUN_PHASE="$PLUGIN_ROOT/scripts/run_phase.py"
 TPL="$PLUGIN_ROOT/scripts/executor-prompt.md"
 
-WORK="$(dirname "$PLAN")/.circle"
+# Рабочая папка — отдельная на каждый план (`.circle/<имя-плана>/`), иначе планы в одной
+# директории делили бы loop.log/result/summary и затирали друг друга.
+WORK_ROOT="$(dirname "$PLAN")/.circle"
+PLAN_SLUG="$(basename "$PLAN" .md)"
+WORK="$WORK_ROOT/$PLAN_SLUG"
 mkdir -p "$WORK"
 LOG="$WORK/loop.log"
 RESULT="$WORK/result"
 SUMMARY="$WORK/summary.txt"
 
 log(){ printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
+
+# Гарантия: вся .circle/ — вне VCS. Логи фаз несут сырой вывод сессий (возможны
+# секреты/чувствительные данные), коммитить их нельзя. `*` в .gitignore покрывает поддерево.
+# Fail-closed: не смогли создать .gitignore → не пишем незащищённые логи, останавливаемся.
+if ! printf '*\n' > "$WORK_ROOT/.gitignore" 2>/dev/null; then
+  log "не удалось создать $WORK_ROOT/.gitignore — отказ писать незащищённые логи, стоп"
+  exit 1
+fi
 
 # Атомарный портируемый лок (mkdir; flock на macOS нет). PID-файл → сброс залипшего лока.
 if ! mkdir "$WORK/lock.d" 2>/dev/null; then
@@ -43,8 +55,9 @@ trap cleanup EXIT
 unset ANTHROPIC_API_KEY  # гарантия: только подписка, не API
 
 hash_plan(){ "$PY" -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PLAN"; }
-# Экранирование для replacement-части sed (& и \ — спецсимволы).
-sed_escape(){ printf '%s' "$1" | sed 's/[&\\]/\\&/g'; }
+# Экранирование для sed: & и \ — спецсимволы replacement-части; | — наш разделитель
+# в s|...|...|g (путь с литеральным | иначе сломал бы команду).
+sed_escape(){ printf '%s' "$1" | sed 's/[&\\|]/\\&/g'; }
 
 STOP_REASON="complete"
 LAST_PHASE=""
@@ -84,6 +97,12 @@ while true; do
   sed -e "s|@@PLAN@@|$PLAN_ESC|g" -e "s|@@PHASE_ID@@|$PHASE_ID_ESC|g" \
       -e "s|@@WORK@@|$WORK_ESC|g" -e "s|@@PLAN_CLI@@|$PLAN_CLI_ESC|g" \
       "$TPL" > "$WORK/executor-prompt.md"
+
+  # Предсобираем компактный срез плана для фазы (преамбула + текст фазы + журнал),
+  # чтобы сессия читала один файл вместо навигации по всему плану.
+  if ! "$PY" "$PLAN_CLI" phase-slice "$PLAN" "$PHASE_ID" > "$WORK/phase-context.md"; then
+    log "phase-slice фазы $PHASE_ID: ошибка — стоп"; STOP_REASON="crash"; break
+  fi
 
   rm -f "$RESULT"
   if ! H1="$(hash_plan)"; then log "hash_plan до сессии: ошибка — стоп"; STOP_REASON="crash"; break; fi

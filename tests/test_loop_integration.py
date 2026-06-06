@@ -38,10 +38,14 @@ class TestLoopIntegration(unittest.TestCase):
         open(p, "w", encoding="utf-8").write(PLAN)
         return p
 
+    def _work(self, plan):
+        # рабочая папка — отдельная на план: .circle/<имя-плана>/
+        slug = os.path.splitext(os.path.basename(plan))[0]
+        return os.path.join(os.path.dirname(plan), ".circle", slug)
+
     def _summary(self, plan):
         return open(
-            os.path.join(os.path.dirname(plan), ".circle", "summary.txt"),
-            encoding="utf-8",
+            os.path.join(self._work(plan), "summary.txt"), encoding="utf-8"
         ).read()
 
     def test_runs_to_completion_skipping_needs_human(self):
@@ -57,6 +61,31 @@ class TestLoopIntegration(unittest.TestCase):
         self.assertEqual(ph["1"].status, "done")
         self.assertEqual(ph["2"].status, "done")
         self.assertEqual(ph["3"].status, "pending")  # needs-human не тронута
+
+    def test_generates_phase_context_and_gitignore(self):
+        plan = self._plan()
+        run_loop(plan, "done")
+        # срез фазы лёг в рабочую папку
+        ctx = os.path.join(self._work(plan), "phase-context.md")
+        self.assertTrue(os.path.exists(ctx), "phase-context.md не создан")
+        body = open(ctx, encoding="utf-8").read()
+        self.assertIn("Фаза", body)
+        # вся .circle/ гарантированно вне VCS
+        gi = os.path.join(os.path.dirname(plan), ".circle", ".gitignore")
+        self.assertEqual(open(gi, encoding="utf-8").read().strip(), "*")
+
+    def test_separate_work_dirs_per_plan(self):
+        # Два плана в одной директории не должны делить .circle/ (логи/result/summary).
+        d = tempfile.mkdtemp()
+        p1 = os.path.join(d, "alpha.md")
+        p2 = os.path.join(d, "beta.md")
+        open(p1, "w", encoding="utf-8").write(PLAN)
+        open(p2, "w", encoding="utf-8").write(PLAN)
+        run_loop(p1, "done")
+        run_loop(p2, "done")
+        self.assertTrue(os.path.exists(os.path.join(self._work(p1), "summary.txt")))
+        self.assertTrue(os.path.exists(os.path.join(self._work(p2), "summary.txt")))
+        self.assertNotEqual(self._work(p1), self._work(p2))
 
     def test_stops_on_no_progress(self):
         plan = self._plan()
