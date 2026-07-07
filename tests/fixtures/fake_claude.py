@@ -30,6 +30,14 @@ def main():
         os.system(f"{sys.executable} {plan_cli} set-status {plan} {phase} done")
         with open(plan, "a", encoding="utf-8") as f:
             f.write(f"\n### fake: фаза {phase} выполнена\n")
+    elif mode == "blocked":
+        # фаза не завершилась: статус blocked, но план изменён (хеш другой, RC=0) —
+        # цикл дойдёт до гейта коммита и должен пропустить (коммитим только done).
+        os.system(
+            f"{sys.executable} {plan_cli} set-status {plan} {phase} blocked --obstacle test"
+        )
+        with open(plan, "a", encoding="utf-8") as f:
+            f.write(f"\n### fake: фаза {phase} заблокирована\n")
     elif mode == "churn":
         os.system(f"{sys.executable} {plan_cli} set-status {plan} {phase} in_progress")
         with open(plan, "a", encoding="utf-8") as f:

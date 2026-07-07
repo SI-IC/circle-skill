@@ -55,6 +55,34 @@ trap cleanup EXIT
 unset ANTHROPIC_API_KEY  # гарантия: только подписка, не API
 
 hash_plan(){ "$PY" -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PLAN"; }
+
+# Репозиторий для пофазных коммитов — тот, что содержит план (там же лежит .circle/ с
+# `*`-gitignore, поэтому логи фаз в коммит не попадут). Не git-репо → COMMIT_REPO пуст → коммит
+# пропускается. Считаем один раз до цикла.
+COMMIT_REPO="$(git -C "$(dirname "$PLAN")" rev-parse --show-toplevel 2>/dev/null || true)"
+
+# Детерминированный пофазный коммит: работа успешной фазы фиксируется в истории сразу.
+# Без него все правки копятся некоммиченными, а `git reset --hard` в откате поздней фазы
+# снёс бы работу всех предыдущих. Best-effort: сбой коммита не валит цикл — фаза уже сделана.
+# Opt-out — CIRCLE_NO_COMMIT=1 (проект сам управляет коммитами).
+commit_phase(){
+  local id="$1" title="$2"
+  [ -n "${CIRCLE_NO_COMMIT:-}" ] && return 0
+  if [ -z "$COMMIT_REPO" ]; then
+    log "план вне git-репозитория — коммит фазы $id пропущен"; return 0
+  fi
+  if [ -z "$(git -C "$COMMIT_REPO" status --porcelain 2>/dev/null)" ]; then
+    log "нечего коммитить после фазы $id"; return 0
+  fi
+  if ! git -C "$COMMIT_REPO" add -A 2>>"$LOG"; then
+    log "git add после фазы $id: ошибка — коммит пропущен"; return 0
+  fi
+  if git -C "$COMMIT_REPO" commit -q -m "circle: phase $id — $title" 2>>"$LOG"; then
+    log "коммит фазы $id создан"
+  else
+    log "git commit после фазы $id: ошибка — продолжаю без коммита"
+  fi
+}
 # Экранирование для sed: & и \ — спецсимволы replacement-части; | — наш разделитель
 # в s|...|...|g (путь с литеральным | иначе сломал бы команду).
 sed_escape(){ printf '%s' "$1" | sed 's/[&\\|]/\\&/g'; }
@@ -119,6 +147,14 @@ while true; do
   if [ "$RC" -eq 3 ]; then log "сессия завершилась без result — стоп"; STOP_REASON="crash"; break; fi
   if [ "$RC" -ne 0 ]; then log "run_phase rc=$RC — стоп"; STOP_REASON="error"; break; fi
   if [ "$H1" = "$H2" ]; then log "план не изменился после сессии — стоп (нет прогресса)"; STOP_REASON="no-progress"; break; fi
+  # Коммитим только реально завершённые (done) фазы. Заблокированная/недоделанная фаза уже
+  # откатила свою работу — фиксировать нечего, а сообщение `phase … done` вводило бы в заблуждение.
+  PHASE_STATUS="$("$PY" "$PLAN_CLI" phases "$PLAN" 2>/dev/null | awk -F'\t' -v id="$PHASE_ID" '$1==id{print $2; exit}')"
+  if [ "$PHASE_STATUS" = "done" ]; then
+    commit_phase "$PHASE_ID" "$PHASE_TITLE"
+  else
+    log "фаза $PHASE_ID: статус=${PHASE_STATUS:-?} (не done) — коммит пропущен"
+  fi
   log "фаза $PHASE_ID обработана; продолжаю"
 done
 

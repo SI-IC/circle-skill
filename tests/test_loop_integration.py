@@ -43,6 +43,28 @@ class TestLoopIntegration(unittest.TestCase):
         slug = os.path.splitext(os.path.basename(plan))[0]
         return os.path.join(os.path.dirname(plan), ".circle", slug)
 
+    def _git_plan(self):
+        # план внутри git-репозитория с настроенной identity и начальным коммитом
+        d = tempfile.mkdtemp()
+        for args in (
+            ["init", "-q"],
+            ["config", "user.email", "t@t"],
+            ["config", "user.name", "t"],
+        ):
+            subprocess.run(["git", "-C", d, *args], check=True)
+        p = os.path.join(d, "plan.md")
+        open(p, "w", encoding="utf-8").write(PLAN)
+        subprocess.run(["git", "-C", d, "add", "plan.md"], check=True)
+        subprocess.run(["git", "-C", d, "commit", "-q", "-m", "init"], check=True)
+        return p
+
+    def _git_log(self, plan):
+        return subprocess.run(
+            ["git", "-C", os.path.dirname(plan), "log", "--oneline"],
+            capture_output=True,
+            text=True,
+        ).stdout
+
     def _summary(self, plan):
         return open(
             os.path.join(self._work(plan), "summary.txt"), encoding="utf-8"
@@ -104,6 +126,26 @@ class TestLoopIntegration(unittest.TestCase):
         run_loop(plan, "churn", extra_env={"CIRCLE_MAX_SAME_PHASE": "2"})
         s = self._summary(plan)
         self.assertIn("STOP_REASON=stuck", s)
+
+    def test_commits_after_each_successful_phase(self):
+        plan = self._git_plan()
+        run_loop(plan, "done")
+        log = self._git_log(plan)
+        self.assertIn("circle: phase 1", log)
+        self.assertIn("circle: phase 2", log)
+
+    def test_no_commit_env_disables_phase_commits(self):
+        plan = self._git_plan()
+        run_loop(plan, "done", extra_env={"CIRCLE_NO_COMMIT": "1"})
+        log = self._git_log(plan)
+        self.assertNotIn("circle: phase", log)
+
+    def test_blocked_phase_is_not_committed(self):
+        # фаза не завершилась done → цикл не создаёт коммит (иначе `phase … done` врал бы)
+        plan = self._git_plan()
+        run_loop(plan, "blocked")
+        log = self._git_log(plan)
+        self.assertNotIn("circle: phase", log)
 
 
 if __name__ == "__main__":
