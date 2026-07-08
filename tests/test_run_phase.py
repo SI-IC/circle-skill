@@ -216,6 +216,64 @@ class TestLogFilter(unittest.TestCase):
         out = self._run(b"\x1b]0;window title\x07prompt\n")
         self.assertEqual(out, b"prompt\n")
 
+    def _filter(self, *chunks):
+        buf = io.BytesIO()
+        f = rp._LogFilter(buf)
+        for c in chunks:
+            f.feed(c)
+        return f
+
+    def test_extracts_context_pct_from_statusline(self):
+        # реальный кадр нижнего статус-бара TUI (снят с живой сессии claude)
+        f = self._filter(
+            "[Opus 4.8 (1M context)] ░░░░░░░░░░ 42% | ⏱ 3m | main ~6\n".encode()
+        )
+        self.assertEqual(f.ctx, 42)
+
+    def test_plain_percent_without_pipe_is_not_context(self):
+        # `%` в тексте сообщения (без `|`-разделителя статус-бара) не считаем контекстом
+        f = self._filter(b"progress 50% complete\n")
+        self.assertIsNone(f.ctx)
+
+    def test_context_pct_updates_to_latest(self):
+        f = self._filter(b"bar 10% | t\n", b"bar 25% | t\n")
+        self.assertEqual(f.ctx, 25)
+
+
+class TestProgressLine(unittest.TestCase):
+    def test_with_ctx_and_label(self):
+        self.assertEqual(
+            rp._progress_line(12, "фаза 2"), "CIRCLE_PROGRESS: контекст 12% · фаза 2"
+        )
+
+    def test_unknown_ctx_shows_question_mark(self):
+        self.assertEqual(
+            rp._progress_line(None, "фаза 2"), "CIRCLE_PROGRESS: контекст ? · фаза 2"
+        )
+
+    def test_no_label(self):
+        self.assertEqual(rp._progress_line(50, ""), "CIRCLE_PROGRESS: контекст 50%")
+
+
+class TestHeartbeat(unittest.TestCase):
+    def test_heartbeat_written_to_log_with_context(self):
+        d = tempfile.mkdtemp()
+        result = os.path.join(d, "result")
+        log = os.path.join(d, "loop.log")
+        # дочерний процесс печатает статус-бар с контекстом и держится (result не пишет)
+        child = [
+            sys.executable,
+            "-c",
+            "import sys,time;sys.stdout.write('bar 37% | timer\\n');sys.stdout.flush();time.sleep(1.5)",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", result, "--timeout", "5",
+             "--log", log, "--heartbeat", "0.3", "--label", "фаза 1", "--", *child],
+            capture_output=True, text=True, timeout=60,
+        )
+        body = open(log, encoding="utf-8").read()
+        self.assertIn("CIRCLE_PROGRESS: контекст 37% · фаза 1", body)
+
 
 if __name__ == "__main__":
     unittest.main()

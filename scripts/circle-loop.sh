@@ -56,32 +56,60 @@ unset ANTHROPIC_API_KEY  # гарантия: только подписка, не
 
 hash_plan(){ "$PY" -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PLAN"; }
 
-# Репозиторий для пофазных коммитов — тот, что содержит план (там же лежит .circle/ с
-# `*`-gitignore, поэтому логи фаз в коммит не попадут). Не git-репо → COMMIT_REPO пуст → коммит
-# пропускается. Считаем один раз до цикла.
+# Репозиторий, где сессия фазы коммитит свою работу — тот, что содержит план (там же лежит
+# .circle/ с `*`-gitignore, поэтому логи фаз в коммит не попадут). Не git-репо → COMMIT_REPO пуст
+# → коммиты выключены. Считаем один раз до цикла.
 COMMIT_REPO="$(git -C "$(dirname "$PLAN")" rev-parse --show-toplevel 2>/dev/null || true)"
 
-# Детерминированный пофазный коммит: работа успешной фазы фиксируется в истории сразу.
-# Без него все правки копятся некоммиченными, а `git reset --hard` в откате поздней фазы
-# снёс бы работу всех предыдущих. Best-effort: сбой коммита не валит цикл — фаза уже сделана.
-# Opt-out — CIRCLE_NO_COMMIT=1 (проект сам управляет коммитами).
-commit_phase(){
-  local id="$1" title="$2"
-  [ -n "${CIRCLE_NO_COMMIT:-}" ] && return 0
-  if [ -z "$COMMIT_REPO" ]; then
-    log "план вне git-репозитория — коммит фазы $id пропущен"; return 0
+# Коммитит теперь САМА сессия фазы (последним шагом, после verify/journal), а не цикл: агент,
+# столкнувшись с падением pre-commit хука проекта, разбирается и устраняет причину в своём же
+# контексте — без обхода (`--no-verify`) и без спавна новой сессии. Цикл лишь СТОРОЖИТ инвариант
+# «done ⇒ закоммичено» (commit_guard ниже). `--no-verify` нет нигде — хуки уважаются. Push цикл не
+# делает никогда. COMMIT_ENABLED прокидывается в промпт: no → сессии сказано не коммитить, guard off.
+if [ -n "${CIRCLE_NO_COMMIT:-}" ] || [ -z "$COMMIT_REPO" ]; then
+  COMMIT_ENABLED="no"
+else
+  COMMIT_ENABLED="yes"
+fi
+
+# Identity для коммитов сессии — без затрат её токенов: если имени/почты нет НИГДЕ, экспортим fallback
+# в окружение (наследуется сессией через PTY), иначе `git commit` упал бы «Author identity unknown».
+# «Есть ли поле?» считаем по фактическому приоритету git: ambient `GIT_AUTHOR/COMMITTER_*` env (если цикл
+# запущен с уже выставленной identity) ИЛИ `git config`. Заполняем ТОЛЬКО реально пустое поле — настоящую
+# identity (хоть из env, хоть из config, хоть частичную) не перекрываем.
+CFG_NAME="$(git -C "$COMMIT_REPO" config user.name 2>/dev/null || true)"
+CFG_EMAIL="$(git -C "$COMMIT_REPO" config user.email 2>/dev/null || true)"
+HAVE_NAME="${GIT_AUTHOR_NAME:-${GIT_COMMITTER_NAME:-$CFG_NAME}}"
+HAVE_EMAIL="${GIT_AUTHOR_EMAIL:-${GIT_COMMITTER_EMAIL:-$CFG_EMAIL}}"
+if [ "$COMMIT_ENABLED" = "yes" ] && { [ -z "$HAVE_NAME" ] || [ -z "$HAVE_EMAIL" ]; }; then
+  [ -z "$HAVE_NAME" ]  && export GIT_AUTHOR_NAME="circle-skill"        GIT_COMMITTER_NAME="circle-skill"
+  [ -z "$HAVE_EMAIL" ] && export GIT_AUTHOR_EMAIL="circle-skill@local" GIT_COMMITTER_EMAIL="circle-skill@local"
+  log "git-identity неполная/отсутствует — недостающие поля коммитов фаз заполнит circle-skill@local"
+fi
+
+# Сторож инварианта «done ⇒ закоммичено». К этому моменту сессия уже завершилась и должна была
+# закоммитить свою работу сама. Признак коммита — СДВИГ HEAD за время сессии ($2 — HEAD до неё), а не
+# просто чистота дерева: pre-commit хук-форматтер (`prettier --write` и т. п.) может оставить residue
+# уже ПОСЛЕ успешного коммита — дерево грязное, но коммит фазы есть, баунсить нельзя. HEAD не сдвинулся
+# и дерево грязное → сессия НЕ закоммитила (забыла/не смогла): НЕ теряем работу и НЕ обходим — возвращаем
+# фазу в in_progress с obstacle, цикл переизберёт её, свежая сессия дочинит/докоммитит. Непочиняемый
+# случай (хук требует недоступного окружения) ловит backstop MAX_SAME → stuck. `.circle/` гитигнорнута
+# и в porcelain не светится. Возврат: 0 — фаза закрыта чисто; 1 — сделан баунс.
+commit_guard(){
+  local id="$1" head_before="$2" head_after
+  [ "$COMMIT_ENABLED" = "yes" ] || return 0
+  head_after="$(git -C "$COMMIT_REPO" rev-parse HEAD 2>/dev/null || true)"
+  if [ "$head_after" != "$head_before" ]; then
+    log "фаза $id закоммичена сессией"; return 0
   fi
   if [ -z "$(git -C "$COMMIT_REPO" status --porcelain 2>/dev/null)" ]; then
-    log "нечего коммитить после фазы $id"; return 0
+    log "фаза $id: коммитить нечего"; return 0
   fi
-  if ! git -C "$COMMIT_REPO" add -A 2>>"$LOG"; then
-    log "git add после фазы $id: ошибка — коммит пропущен"; return 0
-  fi
-  if git -C "$COMMIT_REPO" commit -q -m "circle: phase $id — $title" 2>>"$LOG"; then
-    log "коммит фазы $id создан"
-  else
-    log "git commit после фазы $id: ошибка — продолжаю без коммита"
-  fi
+  log "фаза $id помечена done, но коммита нет — возврат в in_progress (баунс)"
+  "$PY" "$PLAN_CLI" set-status "$PLAN" "$id" in_progress \
+    --obstacle "фаза была помечена done, но её работа НЕ закоммичена; закоммить свою работу (git add -A && git commit, учти хуки проекта) перед сигналом result" \
+    2>>"$LOG" || log "set-status in_progress (баунс) фазы $id: ошибка"
+  return 1
 }
 # Экранирование для sed: & и \ — спецсимволы replacement-части; | — наш разделитель
 # в s|...|...|g (путь с литеральным | иначе сломал бы команду).
@@ -124,6 +152,7 @@ while true; do
   PHASE_ID_ESC="$(sed_escape "$PHASE_ID")"; PLAN_CLI_ESC="$(sed_escape "$PLAN_CLI")"
   sed -e "s|@@PLAN@@|$PLAN_ESC|g" -e "s|@@PHASE_ID@@|$PHASE_ID_ESC|g" \
       -e "s|@@WORK@@|$WORK_ESC|g" -e "s|@@PLAN_CLI@@|$PLAN_CLI_ESC|g" \
+      -e "s|@@COMMIT_ENABLED@@|$COMMIT_ENABLED|g" \
       "$TPL" > "$WORK/executor-prompt.md"
 
   # Предсобираем компактный срез плана для фазы (преамбула + текст фазы + журнал),
@@ -134,10 +163,13 @@ while true; do
 
   rm -f "$RESULT"
   if ! H1="$(hash_plan)"; then log "hash_plan до сессии: ошибка — стоп"; STOP_REASON="crash"; break; fi
+  # HEAD до сессии — по его сдвигу commit_guard узнаёт, закоммитила ли фаза (устойчиво к residue хука).
+  HEAD_BEFORE=""
+  [ "$COMMIT_ENABLED" = "yes" ] && HEAD_BEFORE="$(git -C "$COMMIT_REPO" rev-parse HEAD 2>/dev/null || true)"
   START="Прочитай файл $WORK/executor-prompt.md и выполни инструкцию из него полностью, ничего не спрашивая."
 
   set +e
-  "$PY" "$RUN_PHASE" --result "$RESULT" --timeout "$TIMEOUT" --log "$LOG" -- \
+  "$PY" "$RUN_PHASE" --result "$RESULT" --timeout "$TIMEOUT" --log "$LOG" --label "фаза $PHASE_ID" -- \
         "$CLAUDE_BIN" --dangerously-skip-permissions "$START"
   RC=$?
   set -e
@@ -147,13 +179,13 @@ while true; do
   if [ "$RC" -eq 3 ]; then log "сессия завершилась без result — стоп"; STOP_REASON="crash"; break; fi
   if [ "$RC" -ne 0 ]; then log "run_phase rc=$RC — стоп"; STOP_REASON="error"; break; fi
   if [ "$H1" = "$H2" ]; then log "план не изменился после сессии — стоп (нет прогресса)"; STOP_REASON="no-progress"; break; fi
-  # Коммитим только реально завершённые (done) фазы. Заблокированная/недоделанная фаза уже
-  # откатила свою работу — фиксировать нечего, а сообщение `phase … done` вводило бы в заблуждение.
+  # Инвариант проверяем только для реально завершённых (done) фаз: коммит должна была сделать
+  # сама сессия. Заблокированная/недоделанная фаза откатила свою работу сама — сторожить нечего.
   PHASE_STATUS="$("$PY" "$PLAN_CLI" phases "$PLAN" 2>/dev/null | awk -F'\t' -v id="$PHASE_ID" '$1==id{print $2; exit}')"
   if [ "$PHASE_STATUS" = "done" ]; then
-    commit_phase "$PHASE_ID" "$PHASE_TITLE"
+    commit_guard "$PHASE_ID" "$HEAD_BEFORE" || true   # баунс залогирован; зацикливание ловит MAX_SAME
   else
-    log "фаза $PHASE_ID: статус=${PHASE_STATUS:-?} (не done) — коммит пропущен"
+    log "фаза $PHASE_ID: статус=${PHASE_STATUS:-?} (не done)"
   fi
   log "фаза $PHASE_ID обработана; продолжаю"
 done

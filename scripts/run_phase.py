@@ -18,6 +18,11 @@ _ANSI_RE = re.compile(
 )
 
 
+# Потребление контекста сессии из нижнего статус-бара TUI: «… N% | ⏱ …». Берём число перед
+# `%|`-разделителем — это заякорено на статус-строку и не ловит случайный `%` в тексте сообщения.
+_CTX_RE = re.compile(rb"(\d+)%\s*\|")
+
+
 class _LogFilter:
     r"""Чистит сырой PTY-вывод перед записью в лог. Интерактивный claude рисует TUI и
     перерисовывает экран десятки раз/сек (спиннеры, прогресс), отчего сырой лог раздут
@@ -35,6 +40,7 @@ class _LogFilter:
         self.fh = fh
         self.buf = b""
         self.last = None
+        self.ctx = None  # последнее замеченное потребление контекста, % (None — ещё не видели)
 
     def feed(self, data):
         self.buf += data
@@ -51,6 +57,9 @@ class _LogFilter:
         if not clean or clean == self.last:  # пустые / подряд-дубли кадров — пропускаем
             return
         self.last = clean
+        m = _CTX_RE.search(clean)  # обновляем потребление контекста из статус-бара
+        if m:
+            self.ctx = int(m.group(1))
         self.fh.write(clean + b"\n")
         self.fh.flush()
 
@@ -108,6 +117,20 @@ def _result_ready(path):
         return False
 
 
+def _progress_line(ctx, label):
+    """Одна строка-heartbeat: потребление контекста сессии (+ метка фазы). ctx=None → '?'."""
+    pct = f"{ctx}%" if ctx is not None else "?"
+    tail = f" · {label}" if label else ""
+    return f"CIRCLE_PROGRESS: контекст {pct}{tail}"
+
+
+def _emit_progress(fh, ctx, label):
+    fh.write(
+        (time.strftime("%Y-%m-%dT%H:%M:%S ") + _progress_line(ctx, label) + "\n").encode()
+    )
+    fh.flush()
+
+
 def main(argv=None):
     import pty
 
@@ -116,6 +139,8 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, default=3600.0)
     ap.add_argument("--log", default=None)
     ap.add_argument("--poll", type=float, default=1.0)
+    ap.add_argument("--heartbeat", type=float, default=5.0)  # период строки прогресса, сек
+    ap.add_argument("--label", default="")  # метка фазы для heartbeat
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args(argv)
     cmd = a.cmd[1:] if a.cmd and a.cmd[0] == "--" else a.cmd
@@ -152,6 +177,7 @@ def main(argv=None):
     logf = open(a.log, "ab") if a.log else None
     logfilter = _LogFilter(logf) if logf else None
     start = time.monotonic()
+    next_hb = start + a.heartbeat  # когда писать следующий heartbeat прогресса
     rc = 0
     child_alive = True
 
@@ -181,6 +207,11 @@ def main(argv=None):
                     data = b""
                 if data and logfilter:
                     logfilter.feed(data)
+            # Heartbeat прогресса: периодически пишем в лог потребление контекста сессии — под
+            # строкой цикла «выбрана фаза X» видно, что сессия жива и сколько контекста съела.
+            if logf and time.monotonic() >= next_hb:
+                _emit_progress(logf, logfilter.ctx, a.label)
+                next_hb = time.monotonic() + a.heartbeat
             if _result_ready(a.result):
                 rc = 0
                 break

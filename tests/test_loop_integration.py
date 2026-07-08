@@ -58,12 +58,41 @@ class TestLoopIntegration(unittest.TestCase):
         subprocess.run(["git", "-C", d, "commit", "-q", "-m", "init"], check=True)
         return p
 
+    def _git_plan_no_identity(self):
+        # git-репозиторий БЕЗ настроенной identity (ни локальной, ни — через env в run_loop —
+        # глобальной/системной). Начальный коммит делаем с временной identity через -c,
+        # чтобы завести HEAD, но в конфиге репозитория identity не остаётся.
+        d = tempfile.mkdtemp()
+        subprocess.run(["git", "-C", d, "init", "-q"], check=True)
+        p = os.path.join(d, "plan.md")
+        open(p, "w", encoding="utf-8").write(PLAN)
+        subprocess.run(["git", "-C", d, "add", "plan.md"], check=True)
+        subprocess.run(
+            ["git", "-C", d, "-c", "user.email=seed@seed", "-c", "user.name=seed",
+             "commit", "-q", "-m", "init"],
+            check=True,
+        )
+        return p
+
+    def _no_identity_env(self):
+        # Нейтрализуем глобальную/системную git-identity для подпроцесса цикла,
+        # чтобы воспроизвести реальный кейс «Author identity unknown».
+        return {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1", "HOME": tempfile.mkdtemp()}
+
     def _git_log(self, plan):
         return subprocess.run(
             ["git", "-C", os.path.dirname(plan), "log", "--oneline"],
             capture_output=True,
             text=True,
         ).stdout
+
+    def _last_author_email(self, plan):
+        return subprocess.run(
+            ["git", "-C", os.path.dirname(plan), "log", "-1", "--format=%ae"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
 
     def _summary(self, plan):
         return open(
@@ -127,25 +156,112 @@ class TestLoopIntegration(unittest.TestCase):
         s = self._summary(plan)
         self.assertIn("STOP_REASON=stuck", s)
 
-    def test_commits_after_each_successful_phase(self):
+    def test_session_commits_each_successful_phase(self):
+        # Коммитит сама сессия фазы; цикл-сторож видит чистое дерево и пропускает дальше.
         plan = self._git_plan()
         run_loop(plan, "done")
         log = self._git_log(plan)
         self.assertIn("circle: phase 1", log)
         self.assertIn("circle: phase 2", log)
 
-    def test_no_commit_env_disables_phase_commits(self):
+    def test_no_commit_env_disables_commit(self):
+        # CIRCLE_NO_COMMIT=1 → COMMIT_ENABLED=no: сессии сказано не коммитить, guard выключен,
+        # план исполняется до конца без коммитов circle (проект коммитит сам).
         plan = self._git_plan()
         run_loop(plan, "done", extra_env={"CIRCLE_NO_COMMIT": "1"})
         log = self._git_log(plan)
         self.assertNotIn("circle: phase", log)
+        self.assertIn("STOP_REASON=complete", self._summary(plan))
 
     def test_blocked_phase_is_not_committed(self):
-        # фаза не завершилась done → цикл не создаёт коммит (иначе `phase … done` врал бы)
+        # фаза не завершилась done → сессия ничего не коммитит, guard не трогает не-done фазу
         plan = self._git_plan()
         run_loop(plan, "blocked")
         log = self._git_log(plan)
         self.assertNotIn("circle: phase", log)
+
+    def test_failing_hook_is_not_bypassed(self):
+        # Хук проекта уважается: pre-commit, падающий на коммите сессии, НЕ обходится (--no-verify
+        # убран). Незакоммиченную done-фазу guard возвращает на повтор; непочиняемый хук (fake не
+        # умеет чинить) упирается в backstop MAX_SAME → stuck. Тихой потери/обхода работы нет.
+        plan = self._git_plan()
+        hooks = os.path.join(os.path.dirname(plan), ".git", "hooks")
+        os.makedirs(hooks, exist_ok=True)
+        hook = os.path.join(hooks, "pre-commit")
+        with open(hook, "w") as f:
+            f.write("#!/bin/sh\necho 'lint failed' >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        run_loop(plan, "done", extra_env={"CIRCLE_MAX_SAME_PHASE": "2"})
+        self.assertNotIn("circle: phase", self._git_log(plan))
+        self.assertIn("STOP_REASON=stuck", self._summary(plan))
+
+    def test_guard_bounces_done_left_uncommitted(self):
+        # Инвариант «done ⇒ закоммичено»: сессия пометила done, но не закоммитила. Цикл-сторож
+        # не теряет работу и не обходит — возвращает фазу на повтор; зацикливание ловит MAX_SAME.
+        plan = self._git_plan()
+        run_loop(plan, "done_dirty", extra_env={"CIRCLE_MAX_SAME_PHASE": "2"})
+        self.assertNotIn("circle: phase", self._git_log(plan))
+        self.assertIn("STOP_REASON=stuck", self._summary(plan))
+
+    def test_commits_without_configured_identity(self):
+        # Реальный кейс «Author identity unknown»: репозиторий без identity. Цикл экспортит
+        # fallback-identity в окружение сессии — коммит проходит, работа не теряется.
+        plan = self._git_plan_no_identity()
+        run_loop(plan, "done", extra_env=self._no_identity_env())
+        log = self._git_log(plan)
+        self.assertIn("circle: phase 1", log)
+        self.assertIn("circle: phase 2", log)
+        self.assertEqual(self._last_author_email(plan), "circle-skill@local")
+
+    def test_configured_identity_not_overridden(self):
+        # Fallback-identity ставится ТОЛЬКО при отсутствии настоящей — иначе коммиты фаз
+        # ушли бы не тому автору. Есть identity t@t → цикл env не экспортит, автор сохраняется.
+        plan = self._git_plan()  # identity t@t
+        run_loop(plan, "done")
+        self.assertEqual(self._last_author_email(plan), "t@t")
+
+    def test_ambient_env_identity_not_overridden(self):
+        # Identity может прийти окружением (GIT_AUTHOR_*), а не только из git config. Цикл считает
+        # её настоящей и НЕ перекрывает fallback'ом — коммиты идут от переданного автора.
+        plan = self._git_plan_no_identity()
+        env = self._no_identity_env()
+        env.update({
+            "GIT_AUTHOR_NAME": "Bob", "GIT_AUTHOR_EMAIL": "bob@amb",
+            "GIT_COMMITTER_NAME": "Bob", "GIT_COMMITTER_EMAIL": "bob@amb",
+        })
+        run_loop(plan, "done", extra_env=env)
+        self.assertIn("circle: phase 1", self._git_log(plan))
+        self.assertEqual(self._last_author_email(plan), "bob@amb")
+
+    def test_hook_residue_does_not_false_bounce(self):
+        # pre-commit хук-форматтер может оставить residue уже ПОСЛЕ успешного коммита — дерево грязное,
+        # но коммит фазы есть. Guard смотрит на сдвиг HEAD, а не на чистоту дерева → не баунсит.
+        plan = self._git_plan()
+        hooks = os.path.join(os.path.dirname(plan), ".git", "hooks")
+        os.makedirs(hooks, exist_ok=True)
+        hook = os.path.join(hooks, "pre-commit")
+        with open(hook, "w") as f:
+            f.write("#!/bin/sh\necho residue >> residue.txt\nexit 0\n")
+        os.chmod(hook, 0o755)
+        run_loop(plan, "done")
+        self.assertIn("circle: phase 1", self._git_log(plan))
+        self.assertIn("STOP_REASON=complete", self._summary(plan))
+
+    def test_partial_identity_preserves_configured_field(self):
+        # Частичная identity: настроен email, но не name. Fallback заполняет ТОЛЬКО пробел (name),
+        # реальный email НЕ перекрывается (env приоритетнее config — затёр бы его).
+        d = tempfile.mkdtemp()
+        subprocess.run(["git", "-C", d, "init", "-q"], check=True)
+        subprocess.run(["git", "-C", d, "config", "user.email", "alice@corp"], check=True)
+        p = os.path.join(d, "plan.md")
+        open(p, "w", encoding="utf-8").write(PLAN)
+        subprocess.run(["git", "-C", d, "add", "plan.md"], check=True)
+        subprocess.run(
+            ["git", "-C", d, "-c", "user.name=seed", "commit", "-q", "-m", "init"], check=True
+        )
+        run_loop(p, "done", extra_env=self._no_identity_env())
+        self.assertIn("circle: phase 1", self._git_log(p))
+        self.assertEqual(self._last_author_email(p), "alice@corp")
 
 
 if __name__ == "__main__":
