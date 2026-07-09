@@ -39,7 +39,9 @@
   whitelist-скраб, покрытие манифеста из git-дифа (пути не покидают процесс), сборка одного conflict-free
   JSON на прогон; клиент `send` (urllib) шлёт его на приёмник с bearer, outbox-ledger догоняет неотправленное.
   Врезка в `circle-loop.sh`: per-phase `record-phase`, финал `build-run`+`send`, строка `телеметрия: …`.
-  Конфиг — из `.env` **проекта** (`CIRCLE_TELEMETRY_URL`/`_TOKEN`/`_SALT`), активация — `/circle-telemetry`.
+  Конфиг — из `.env` **проекта** (`CIRCLE_TELEMETRY_URL`/`_TOKEN`/`_SALT`), активация — `/circle-telemetry`
+  (команда делегирует в `scripts/telemetry-client.sh`; логика вынесена из inline-`bash -c` в файл, иначе
+  литеральные кавычки рвали обрамление).
 - `scripts/telemetry_server.py` — приёмник в контейнере-базе (systemd `circle-telemetry.service`, порт 3000,
   переживает рестарт; ставит `telemetry-server-install.sh`): bearer-auth, size-cap, повторный fail-closed
   скраб, дедуп по `run_uuid`, store под gitignore. `scripts/telemetry_analyze.py` — учёт разобранных записей
