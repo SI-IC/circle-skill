@@ -173,12 +173,12 @@ bash scripts/telemetry-server-install.sh   # systemd-сервис, порт 3000
 добавляется в `.gitignore`, затем пинг `/health`):
 
 ```
-/circle-telemetry activate https://<preview-url> <токен>
+/circle-skill:circle-telemetry activate https://<preview-url> <токен>
 ```
 
 Обновился токен на приёмнике — повтори `activate` с новым (перезапишет в `.env`). Приёмник был
 недоступен на финише прогона — записи ждут в outbox, догоняются на следующем прогоне или командой
-`/circle-telemetry send`.
+`/circle-skill:circle-telemetry send`.
 
 ### Env-переменные телеметрии
 

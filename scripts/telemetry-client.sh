@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # circle-skill: клиентская утилита телеметрии для проекта — активация/проверка/догон-отправка.
-# Вызывается командой /circle-telemetry. ВЫНЕСЕНА в отдельный файл (не inline `!\`bash -c '...'\``
+# Вызывается командой /circle-skill:circle-telemetry. ВЫНЕСЕНА в отдельный файл (не inline `!\`bash -c '...'\``
 # в md): внутри одинарно-кавыченного `bash -c '...'` литеральные `'` рвали обрамление и скрипт
 # исполнялся покорёженным. В обычном файле кавычки работают штатно.
 #
@@ -48,7 +48,7 @@ case "$CMD" in
     fi
     URL="$(env_get CIRCLE_TELEMETRY_URL)"; TOK="$(env_get CIRCLE_TELEMETRY_TOKEN)"
     if [ -z "$URL" ] || [ -z "$TOK" ]; then
-      echo "CIRCLE_TELEMETRY: нет URL/токена в $ENVF — передай: /circle-telemetry activate <url> <token>"
+      echo "CIRCLE_TELEMETRY: нет URL/токена в $ENVF — передай: /circle-skill:circle-telemetry activate <url> <token>"
       exit 0
     fi
     CIRCLE_TELEMETRY_TOKEN="$TOK" "$PY" "$TELE" activate --url "$URL"
@@ -66,6 +66,6 @@ case "$CMD" in
     [ "$any" = 0 ] && echo "нет накопленных записей (.circle/*/run-stats/outbox пусто)"
     ;;
   *)
-    echo "использование: /circle-telemetry activate <url> <token> | activate | send"
+    echo "использование: /circle-skill:circle-telemetry activate <url> <token> | activate | send"
     ;;
 esac
