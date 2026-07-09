@@ -247,6 +247,77 @@ def _atomic_write(path, data):
     os.replace(tmp, path)
 
 
+# --- клиент: отправка на приёмник (best-effort, ноль LLM-токенов) -------------
+#
+# Модель ledger'а: build-run кладёт готовый JSON в <work>/run-stats/outbox/. send пытается
+# доставить всё из outbox; доставленное (2xx, дедуп на сервере) удаляется из outbox и пишется
+# в sent.log. Недоставленное остаётся в outbox → догон при следующем прогоне или командой.
+
+def _outbox(work):
+    return os.path.join(work, "run-stats", "outbox")
+
+
+def _post(url, token, data, timeout):
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Authorization", "Bearer " + token)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, None
+    except urllib.error.HTTPError as e:
+        return e.code, ("401" if e.code == 401 else "http-%d" % e.code)
+    except OSError:
+        return None, "нет-связи"
+
+
+def ping(url, token, timeout=10):
+    """GET /health с bearer. (ok, reason). Для команды активации в проекте."""
+    import urllib.error
+    import urllib.request
+
+    if not url or not token:
+        return False, "не-настроено"
+    req = urllib.request.Request(url.rstrip("/") + "/health", method="GET")
+    req.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return (r.status == 200), (None if r.status == 200 else "http-%d" % r.status)
+    except urllib.error.HTTPError as e:
+        return False, ("401" if e.code == 401 else "http-%d" % e.code)
+    except OSError:
+        return False, "нет-связи"
+
+
+def send_outbox(work, url, token, timeout=10):
+    """Догоняет всё неотправленное из outbox. Возвращает {sent, failed, reason}. Best-effort:
+    сетевой/auth-сбой не бросает исключение — файлы остаются в outbox до следующего раза."""
+    import glob
+
+    files = sorted(glob.glob(os.path.join(_outbox(work), "*.json")))
+    if not files:
+        return {"sent": 0, "failed": 0, "reason": "нет-данных"}
+    if not url or not token:
+        return {"sent": 0, "failed": len(files), "reason": "не-настроено"}
+    endpoint = url.rstrip("/") + "/ingest"
+    sent = failed = 0
+    reason = "ok"
+    for fp in files:
+        with open(fp, "rb") as f:
+            data = f.read()
+        status, err = _post(endpoint, token, data, timeout)
+        if status in (200, 201):
+            os.remove(fp)
+            _append_line(os.path.join(work, "run-stats", "sent.log"), os.path.basename(fp))
+            sent += 1
+        else:
+            failed += 1
+            reason = err or "ошибка"
+    return {"sent": sent, "failed": failed, "reason": "ok" if failed == 0 else reason}
+
+
 # --- CLI ----------------------------------------------------------------------
 
 def _parse_status_counts(csv):
@@ -290,6 +361,15 @@ def main(argv=None):
     p.add_argument("--phases-total", default=0)
     p.add_argument("--status-counts", default="")
 
+    p = sub.add_parser("send")
+    p.add_argument("--work", required=True)
+    p.add_argument("--url", default=os.environ.get("CIRCLE_TELEMETRY_URL", ""))
+    p.add_argument("--token", default=os.environ.get("CIRCLE_TELEMETRY_TOKEN", ""))
+
+    p = sub.add_parser("activate")
+    p.add_argument("--url", default=os.environ.get("CIRCLE_TELEMETRY_URL", ""))
+    p.add_argument("--token", default=os.environ.get("CIRCLE_TELEMETRY_TOKEN", ""))
+
     a = ap.parse_args(argv)
     salt = os.environ.get("CIRCLE_TELEMETRY_SALT") or None
 
@@ -328,6 +408,21 @@ def main(argv=None):
                       json.dumps(rec, ensure_ascii=False, indent=2))
         print(name)
         return 0
+
+    if a.cmd == "send":
+        r = send_outbox(a.work, a.url, a.token)
+        # строка статуса для финала цикла — единственное «дорогое» (и то печатает цикл, не LLM)
+        print("отправлено=%d не_отправлено=%d причина=%s"
+              % (r["sent"], r["failed"], r["reason"]))
+        return 0
+
+    if a.cmd == "activate":
+        ok, reason = ping(a.url, a.token)
+        if ok:
+            print("активация: связь с приёмником есть, логирование включено")
+            return 0
+        print("активация: НЕ включено (причина: %s)" % (reason or "?"), file=sys.stderr)
+        return 1
 
     return 2
 
