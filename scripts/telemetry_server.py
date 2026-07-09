@@ -50,6 +50,7 @@ def _valid_envelope(rec):
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "circle-telemetry/1"
+    timeout = 10  # per-connection read timeout — режет slowloris (медленное тело/заголовки)
 
     def _reply(self, code, payload):
         body = json.dumps(payload).encode("utf-8")
@@ -89,11 +90,16 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         try:
             rec = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError — глубоко вложенный JSON (укладывается в MAX_BODY, но валит рекурсию).
             return self._reply(400, {"error": "bad_json"})
         if not _valid_envelope(rec):
             return self._reply(400, {"error": "bad_envelope"})
-        if not _tele.scrub_record(rec):
+        try:
+            clean = _tele.scrub_record(rec)
+        except RecursionError:
+            return self._reply(400, {"error": "scrub_failed"})
+        if not clean:
             return self._reply(400, {"error": "scrub_failed"})
         # дедуп по run_uuid — идемпотентно
         store = self.server.store_dir

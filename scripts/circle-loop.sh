@@ -98,7 +98,9 @@ PROJECT_ENV="${COMMIT_REPO:-$(dirname "$PLAN")}/.env"
 _env_get(){ [ -f "$PROJECT_ENV" ] && sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$PROJECT_ENV" 2>/dev/null | tail -1 | sed "s/^[\"']//; s/[\"']$//" || true; }
 TELE_URL="${CIRCLE_TELEMETRY_URL:-$(_env_get CIRCLE_TELEMETRY_URL)}"
 TELE_TOKEN="${CIRCLE_TELEMETRY_TOKEN:-$(_env_get CIRCLE_TELEMETRY_TOKEN)}"
-export CIRCLE_TELEMETRY_SALT="${CIRCLE_TELEMETRY_SALT:-$(_env_get CIRCLE_TELEMETRY_SALT)}"  # ident() читает соль из env
+# Соль НЕ экспортим в окружение (иначе автономная сессия прочла бы её через printenv и могла бы
+# брутфорсить низкоэнтропийные HMAC-иды). Передаём инлайн только тем python-вызовам, кому нужна.
+TELE_SALT="${CIRCLE_TELEMETRY_SALT:-$(_env_get CIRCLE_TELEMETRY_SALT)}"
 TELE_ENABLED="no"
 [ -n "$TELE_URL" ] && [ -n "$TELE_TOKEN" ] && TELE_ENABLED="yes"
 [ "$TELE_ENABLED" = "yes" ] && log "телеметрия включена (приёмник: $TELE_URL)"
@@ -239,7 +241,7 @@ except Exception:
 TELE_META
     T_OUTCOME="${PHASE_STATUS:-error}"
     [ "$PLAN_CHANGED" = 0 ] && [ "$PHASE_STATUS" != "done" ] && T_OUTCOME="no-change"
-    printf '%s\n' "$DIFF_FILES" | "$PY" "$TELEMETRY" record-phase "$PLAN" "$PHASE_ID" \
+    printf '%s\n' "$DIFF_FILES" | CIRCLE_TELEMETRY_SALT="$TELE_SALT" "$PY" "$TELEMETRY" record-phase "$PLAN" "$PHASE_ID" \
       --work "$WORK" --ordinal "${T_ORD:-0}" --attempts "$SAME_COUNT" --duration-s "$PHASE_DUR" \
       --outcome "$T_OUTCOME" --plan-changed "$PLAN_CHANGED" --committed "$COMMITTED" \
       --deps-count "${T_DEPS:-0}" --autonomy "${T_AUTON:-auto}" --subphases-added "$SUBPHASES" \
@@ -264,11 +266,12 @@ try:
     c=json.load(sys.stdin).get("counts",{}); print(",".join("%s=%s"%(k,v) for k,v in c.items()))
 except Exception:
     print("")' 2>/dev/null || echo)"
-  "$PY" "$TELEMETRY" build-run "$PLAN" --work "$WORK" --out-dir "$WORK/run-stats/outbox" \
+  CIRCLE_TELEMETRY_SALT="$TELE_SALT" "$PY" "$TELEMETRY" build-run "$PLAN" --work "$WORK" --out-dir "$WORK/run-stats/outbox" \
     --plugin-version "$PLUGIN_VER" --stop-reason "$STOP_REASON" \
     --run-wall-s 0 --sessions-total "$SESSIONS" --phases-total "$PHASES_TOTAL" \
     --status-counts "$STATUS_CSV" 2>>"$LOG" || log "телеметрия build-run: ошибка (best-effort)"
-  TELE_STATUS="$("$PY" "$TELEMETRY" send --work "$WORK" --url "$TELE_URL" --token "$TELE_TOKEN" 2>>"$LOG" || echo 'отправлено=0 не_отправлено=? причина=ошибка')"
+  # Токен — через env дочернего процесса, НЕ через argv (иначе виден в ps/proc).
+  TELE_STATUS="$(CIRCLE_TELEMETRY_TOKEN="$TELE_TOKEN" "$PY" "$TELEMETRY" send --work "$WORK" --url "$TELE_URL" 2>>"$LOG" || echo 'отправлено=0 не_отправлено=? причина=ошибка')"
   log "телеметрия: $TELE_STATUS"
   printf 'телеметрия: %s\n' "$TELE_STATUS" >> "$SUMMARY"
 fi

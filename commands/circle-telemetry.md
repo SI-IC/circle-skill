@@ -44,7 +44,7 @@ if [ "$CMD" = "activate" ]; then
   if [ -z "$URL" ] || [ -z "$TOK" ]; then
     echo "CIRCLE_TELEMETRY: нет URL/токена в $ENVF — передай: /circle-telemetry activate <url> <token>"; exit 0
   fi
-  "$PY" "$TELE" activate --url "$URL" --token "$TOK"
+  CIRCLE_TELEMETRY_TOKEN="$TOK" "$PY" "$TELE" activate --url "$URL"
 elif [ "$CMD" = "send" ]; then
   URL="$(env_get CIRCLE_TELEMETRY_URL)"; TOK="$(env_get CIRCLE_TELEMETRY_TOKEN)"
   if [ -z "$URL" ] || [ -z "$TOK" ]; then echo "CIRCLE_TELEMETRY: не настроено (нет .env)"; exit 0; fi
@@ -53,7 +53,7 @@ elif [ "$CMD" = "send" ]; then
     [ -d "$ob" ] || continue
     W="$(dirname "$(dirname "$ob")")"; any=1
     printf "%s: " "$(basename "$W")"
-    "$PY" "$TELE" send --work "$W" --url "$URL" --token "$TOK"
+    CIRCLE_TELEMETRY_TOKEN="$TOK" "$PY" "$TELE" send --work "$W" --url "$URL"
   done
   [ "$any" = 0 ] && echo "нет накопленных записей (.circle/*/run-stats/outbox пусто)"
 else

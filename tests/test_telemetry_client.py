@@ -105,6 +105,39 @@ class TestClient(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "нет-связи")
 
+    def test_send_rejects_plain_http_external(self):
+        # голый http на внешний хост — токен НЕ уходит в открытом виде, outbox сохранён
+        self._stage("ffffffffffff")
+        r = tele.send_outbox(self.work, "http://example.com:3000", TOKEN)
+        self.assertEqual(r["reason"], "небезопасный-url")
+        self.assertEqual(r["sent"], 0)
+        self.assertEqual(os.listdir(self.outbox), ["ffffffffffff.json"])
+
+    def test_activate_rejects_plain_http_external(self):
+        ok, reason = tele.ping("http://example.com", TOKEN)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "небезопасный-url")
+
+    def test_https_url_allowed(self):
+        self.assertTrue(tele._url_ok("https://x.example.com/path"))
+        self.assertTrue(tele._url_ok("http://127.0.0.1:3000"))
+        self.assertTrue(tele._url_ok("http://localhost:8080"))
+        self.assertFalse(tele._url_ok("http://10.0.0.5:3000"))
+        self.assertFalse(tele._url_ok("ftp://x"))
+
+    def test_send_poison_record_moved_to_rejected(self):
+        # запись, которую приёмник отвергнет навсегда (битый envelope → 400), уходит из outbox
+        # в rejected/, а не ретраится вечно
+        with open(os.path.join(self.outbox, "bad.json"), "w") as f:
+            f.write('{"schema_version":"1"}')  # нет run_uuid → 400 bad_envelope
+        r = tele.send_outbox(self.work, self.url, TOKEN)
+        self.assertEqual(r["sent"], 0)
+        self.assertEqual(r["failed"], 1)
+        self.assertEqual(r["reason"], "отклонено-приёмником")
+        self.assertEqual(os.listdir(self.outbox), [])  # из outbox убрано
+        rej = os.path.join(self.work, "run-stats", "rejected")
+        self.assertEqual(os.listdir(rej), ["bad.json"])
+
 
 if __name__ == "__main__":
     unittest.main()

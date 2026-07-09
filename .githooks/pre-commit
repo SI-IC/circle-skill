@@ -18,8 +18,10 @@ fi
 
 STAGED="$(git diff --cached -U0 --no-color 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
 
-# (2) присвоение токена длинному значению (>=32 символов алфавита секретов), а не плейсхолдеру
-if printf '%s\n' "$STAGED" | grep -qE 'CIRCLE_TELEMETRY_TOKEN[[:space:]]*=[[:space:]]*['"'"'"]?[A-Za-z0-9+/=_-]{32,}'; then
+# (2) токен=длинное значение (>=32 символов алфавита секретов), а не плейсхолдер. Покрываем и
+# env-форму (KEY=val), и JSON/YAML (["]KEY["] : ["]val["]) — разделитель [:=], кавычки опциональны.
+TOK_ASSIGN="[\"']?CIRCLE_TELEMETRY_TOKEN[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9+/=_-]{32,}"
+if printf '%s\n' "$STAGED" | grep -qE "$TOK_ASSIGN"; then
   echo "pre-commit: отказ — похоже на реальный CIRCLE_TELEMETRY_TOKEN в staged. Держи токен только в .env." >&2
   fail=1
 fi

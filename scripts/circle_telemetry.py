@@ -257,6 +257,20 @@ def _outbox(work):
     return os.path.join(work, "run-stats", "outbox")
 
 
+def _url_ok(url):
+    """Токен/данные шлём только по https ЛИБО http на loopback (локальный тест/прокси на той же
+    машине). Голый http на внешний хост → отказ: bearer и запись не должны идти в открытом виде."""
+    from urllib.parse import urlparse
+
+    try:
+        u = urlparse(url or "")
+    except ValueError:
+        return False
+    if u.scheme == "https":
+        return True
+    return u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1")
+
+
 def _post(url, token, data, timeout):
     import urllib.error
     import urllib.request
@@ -280,6 +294,8 @@ def ping(url, token, timeout=10):
 
     if not url or not token:
         return False, "не-настроено"
+    if not _url_ok(url):
+        return False, "небезопасный-url"
     req = urllib.request.Request(url.rstrip("/") + "/health", method="GET")
     req.add_header("Authorization", "Bearer " + token)
     try:
@@ -301,6 +317,8 @@ def send_outbox(work, url, token, timeout=10):
         return {"sent": 0, "failed": 0, "reason": "нет-данных"}
     if not url or not token:
         return {"sent": 0, "failed": len(files), "reason": "не-настроено"}
+    if not _url_ok(url):  # не шлём токен по plain-http на внешний хост
+        return {"sent": 0, "failed": len(files), "reason": "небезопасный-url"}
     endpoint = url.rstrip("/") + "/ingest"
     sent = failed = 0
     reason = "ok"
@@ -312,7 +330,16 @@ def send_outbox(work, url, token, timeout=10):
             os.remove(fp)
             _append_line(os.path.join(work, "run-stats", "sent.log"), os.path.basename(fp))
             sent += 1
+        elif status in (400, 413):
+            # Приёмник отверг запись НАВСЕГДА (битая/слишком большая) — уводим из outbox в
+            # rejected/, иначе она ретраилась бы каждый прогон и блокировала очередь (poison).
+            rej = os.path.join(work, "run-stats", "rejected")
+            os.makedirs(rej, exist_ok=True)
+            os.replace(fp, os.path.join(rej, os.path.basename(fp)))
+            failed += 1
+            reason = "отклонено-приёмником"
         else:
+            # 401 / нет-связи — транзиентно: файл остаётся в outbox до следующего раза.
             failed += 1
             reason = err or "ошибка"
     return {"sent": sent, "failed": failed, "reason": "ok" if failed == 0 else reason}

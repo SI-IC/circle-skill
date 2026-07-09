@@ -84,6 +84,19 @@ class TestGate(unittest.TestCase):
         self.assertFalse(tele.string_ok('"quoted"'))
 
 
+class TestHeadingParity(unittest.TestCase):
+    def test_heading_regex_matches_circle_plan(self):
+        # _HEADING_RE скопирован из circle_plan.HEADING_RE; при расхождении manifest_declared
+        # молча обнулился бы. Этот тест падает, если форматы заголовка фазы разошлись.
+        spec = importlib.util.spec_from_file_location(
+            "circle_plan",
+            Path(__file__).resolve().parent.parent / "scripts" / "circle_plan.py",
+        )
+        cp = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cp)
+        self.assertEqual(tele._HEADING_RE.pattern, cp.HEADING_RE.pattern)
+
+
 class TestParsing(unittest.TestCase):
     def test_manifest_paths(self):
         self.assertEqual(
