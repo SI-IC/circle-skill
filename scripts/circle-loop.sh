@@ -87,6 +87,22 @@ if [ "$COMMIT_ENABLED" = "yes" ] && { [ -z "$HAVE_NAME" ] || [ -z "$HAVE_EMAIL" 
   log "git-identity неполная/отсутствует — недостающие поля коммитов фаз заполнит circle-skill@local"
 fi
 
+# Телеметрия эффективности (опционально, off по умолчанию). Весь сбор ДЕТЕРМИНИРОВАННЫЙ
+# (bash+git+circle_telemetry.py) — ноль лишних токенов сессий; наружу уходит только безопасный
+# структурный JSON, отправку сторожит fail-closed скраб на приёмнике. Конфиг — из .env проекта:
+# CIRCLE_TELEMETRY_URL + CIRCLE_TELEMETRY_TOKEN (+ опц. CIRCLE_TELEMETRY_SALT для кросс-машинной
+# группировки). Нет URL/токена → телеметрия полностью выключена (поведение цикла не меняется).
+TELEMETRY="$PLUGIN_ROOT/scripts/circle_telemetry.py"
+PROJECT_ENV="${COMMIT_REPO:-$(dirname "$PLAN")}/.env"
+# Достаём только наши ключи из .env — без `source` (не исполняем чужой файл).
+_env_get(){ [ -f "$PROJECT_ENV" ] && sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$PROJECT_ENV" 2>/dev/null | tail -1 | sed "s/^[\"']//; s/[\"']$//" || true; }
+TELE_URL="${CIRCLE_TELEMETRY_URL:-$(_env_get CIRCLE_TELEMETRY_URL)}"
+TELE_TOKEN="${CIRCLE_TELEMETRY_TOKEN:-$(_env_get CIRCLE_TELEMETRY_TOKEN)}"
+export CIRCLE_TELEMETRY_SALT="${CIRCLE_TELEMETRY_SALT:-$(_env_get CIRCLE_TELEMETRY_SALT)}"  # ident() читает соль из env
+TELE_ENABLED="no"
+[ -n "$TELE_URL" ] && [ -n "$TELE_TOKEN" ] && TELE_ENABLED="yes"
+[ "$TELE_ENABLED" = "yes" ] && log "телеметрия включена (приёмник: $TELE_URL)"
+
 # Сторож инварианта «done ⇒ закоммичено». К этому моменту сессия уже завершилась и должна была
 # закоммитить свою работу сама. Признак коммита — СДВИГ HEAD за время сессии ($2 — HEAD до неё), а не
 # просто чистота дерева: pre-commit хук-форматтер (`prettier --write` и т. п.) может оставить residue
@@ -118,6 +134,7 @@ sed_escape(){ printf '%s' "$1" | sed 's/[&\\|]/\\&/g'; }
 STOP_REASON="complete"
 LAST_PHASE=""
 SAME_COUNT=0
+SESSIONS=0  # число запущенных сессий за прогон (для телеметрии)
 
 # Инвариант: circle_plan.py next МОЖЕТ вернуть in_progress-фазу (резюм). Если сессия каждый раз
 # меняет план косметически, но не закрывает фазу, hash-гард не срабатывает — поэтому backstop:
@@ -166,6 +183,14 @@ while true; do
   # HEAD до сессии — по его сдвигу commit_guard узнаёт, закоммитила ли фаза (устойчиво к residue хука).
   HEAD_BEFORE=""
   [ "$COMMIT_ENABLED" = "yes" ] && HEAD_BEFORE="$(git -C "$COMMIT_REPO" rev-parse HEAD 2>/dev/null || true)"
+  # Предсессионные замеры телеметрии (детерминированные, best-effort).
+  SESSIONS=$((SESSIONS + 1))
+  PHASE_START=$(date +%s)
+  TELE_HEAD_BEFORE=""; PHASES_BEFORE=0
+  if [ "$TELE_ENABLED" = "yes" ]; then
+    [ -n "$COMMIT_REPO" ] && TELE_HEAD_BEFORE="$(git -C "$COMMIT_REPO" rev-parse HEAD 2>/dev/null || echo)"
+    PHASES_BEFORE="$("$PY" "$PLAN_CLI" phases "$PLAN" 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+  fi
   START="Прочитай файл $WORK/executor-prompt.md и выполни инструкцию из него полностью, ничего не спрашивая."
 
   set +e
@@ -187,6 +212,39 @@ while true; do
   else
     log "фаза $PHASE_ID: статус=${PHASE_STATUS:-?} (не done)"
   fi
+
+  # Пофазная запись телеметрии — детерминированная, best-effort (сбой не трогает цикл).
+  if [ "$TELE_ENABLED" = "yes" ]; then
+    PHASE_DUR=$(( $(date +%s) - PHASE_START ))
+    AFTER_SHA=""; DIFF_FILES=""
+    if [ -n "$COMMIT_REPO" ] && [ -n "$TELE_HEAD_BEFORE" ]; then
+      AFTER_SHA="$(git -C "$COMMIT_REPO" rev-parse HEAD 2>/dev/null || echo)"
+      if [ -n "$AFTER_SHA" ] && [ "$AFTER_SHA" != "$TELE_HEAD_BEFORE" ]; then
+        DIFF_FILES="$(git -C "$COMMIT_REPO" diff --name-only "$TELE_HEAD_BEFORE" "$AFTER_SHA" 2>/dev/null || echo)"
+      fi
+    fi
+    PHASES_AFTER="$("$PY" "$PLAN_CLI" phases "$PLAN" 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+    SUBPHASES=$(( PHASES_AFTER - PHASES_BEFORE )); [ "$SUBPHASES" -lt 0 ] && SUBPHASES=0
+    PLAN_CHANGED=0; [ "$H1" != "$H2" ] && PLAN_CHANGED=1
+    COMMITTED=0; [ -n "$AFTER_SHA" ] && [ "$AFTER_SHA" != "$TELE_HEAD_BEFORE" ] && COMMITTED=1
+    # order + deps_count + autonomy одной командой (одна phases --json, один парс)
+    read -r T_ORD T_DEPS T_AUTON <<TELE_META
+$("$PY" "$PLAN_CLI" phases "$PLAN" --json 2>/dev/null | "$PY" -c 'import json,sys
+try:
+    d=json.load(sys.stdin); pid=sys.argv[1]
+    p=next((x for x in d if x["id"]==pid), {})
+    print(p.get("order",0), len(p.get("deps",[]) or []), p.get("autonomy","auto"))
+except Exception:
+    print(0,0,"auto")' "$PHASE_ID" 2>/dev/null || echo "0 0 auto")
+TELE_META
+    T_OUTCOME="${PHASE_STATUS:-error}"
+    [ "$PLAN_CHANGED" = 0 ] && [ "$PHASE_STATUS" != "done" ] && T_OUTCOME="no-change"
+    printf '%s\n' "$DIFF_FILES" | "$PY" "$TELEMETRY" record-phase "$PLAN" "$PHASE_ID" \
+      --work "$WORK" --ordinal "${T_ORD:-0}" --attempts "$SAME_COUNT" --duration-s "$PHASE_DUR" \
+      --outcome "$T_OUTCOME" --plan-changed "$PLAN_CHANGED" --committed "$COMMITTED" \
+      --deps-count "${T_DEPS:-0}" --autonomy "${T_AUTON:-auto}" --subphases-added "$SUBPHASES" \
+      2>>"$LOG" || log "телеметрия record-phase фазы $PHASE_ID: ошибка (best-effort)"
+  fi
   log "фаза $PHASE_ID обработана; продолжаю"
 done
 
@@ -195,4 +253,24 @@ done
   echo "---"
   "$PY" "$PLAN_CLI" summary "$PLAN" || true
 } > "$SUMMARY"
+
+# Финал телеметрии: собрать один conflict-free JSON прогона в outbox и догнать всё неотправленное.
+# Всё best-effort; единственная «дорогая» строка — статус отправки (её печатает цикл, не сессия).
+if [ "$TELE_ENABLED" = "yes" ]; then
+  PLUGIN_VER="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1])).get("version","0"))' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null || echo 0)"
+  PHASES_TOTAL="$("$PY" "$PLAN_CLI" phases "$PLAN" 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+  STATUS_CSV="$("$PY" "$PLAN_CLI" summary "$PLAN" --json 2>/dev/null | "$PY" -c 'import json,sys
+try:
+    c=json.load(sys.stdin).get("counts",{}); print(",".join("%s=%s"%(k,v) for k,v in c.items()))
+except Exception:
+    print("")' 2>/dev/null || echo)"
+  "$PY" "$TELEMETRY" build-run "$PLAN" --work "$WORK" --out-dir "$WORK/run-stats/outbox" \
+    --plugin-version "$PLUGIN_VER" --stop-reason "$STOP_REASON" \
+    --run-wall-s 0 --sessions-total "$SESSIONS" --phases-total "$PHASES_TOTAL" \
+    --status-counts "$STATUS_CSV" 2>>"$LOG" || log "телеметрия build-run: ошибка (best-effort)"
+  TELE_STATUS="$("$PY" "$TELEMETRY" send --work "$WORK" --url "$TELE_URL" --token "$TELE_TOKEN" 2>>"$LOG" || echo 'отправлено=0 не_отправлено=? причина=ошибка')"
+  log "телеметрия: $TELE_STATUS"
+  printf 'телеметрия: %s\n' "$TELE_STATUS" >> "$SUMMARY"
+fi
+
 log "=== стоп: $STOP_REASON. Сводка → $SUMMARY ==="
