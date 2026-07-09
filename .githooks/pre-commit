@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# circle-skill: guard «bearer-токен телеметрии НИКОГДА не в VCS» (см. README «Телеметрия», пункт приватности).
+# Блокирует коммит, если в staged-изменениях:
+#   1) сам файл .env (секреты, gitignored — но `git add -f` мог бы протащить);
+#   2) присвоение CIRCLE_TELEMETRY_TOKEN длинному high-entropy значению (не docs-плейсхолдер <...>);
+#   3) точное вхождение реального токена из локального .env (если он там задан).
+# Обойти разово (осознанно): git commit --no-verify.
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)"
+fail=0
+
+# (1) .env в индексе
+if git diff --cached --name-only -z | tr '\0' '\n' | grep -qxE '(.*/)?\.env'; then
+  echo "pre-commit: отказ — .env в staged. Токен телеметрии не коммитим. Убери: git restore --staged .env" >&2
+  fail=1
+fi
+
+STAGED="$(git diff --cached -U0 --no-color 2>/dev/null | grep '^+' | grep -v '^+++' || true)"
+
+# (2) присвоение токена длинному значению (>=32 символов алфавита секретов), а не плейсхолдеру
+if printf '%s\n' "$STAGED" | grep -qE 'CIRCLE_TELEMETRY_TOKEN[[:space:]]*=[[:space:]]*['"'"'"]?[A-Za-z0-9+/=_-]{32,}'; then
+  echo "pre-commit: отказ — похоже на реальный CIRCLE_TELEMETRY_TOKEN в staged. Держи токен только в .env." >&2
+  fail=1
+fi
+
+# (3) точное вхождение локального токена
+if [ -f "$REPO/.env" ]; then
+  TOK="$(grep -E '^[[:space:]]*CIRCLE_TELEMETRY_TOKEN[[:space:]]*=' "$REPO/.env" 2>/dev/null | tail -1 | sed -E 's/^[^=]*=[[:space:]]*//; s/^["'"'"']//; s/["'"'"'][[:space:]]*$//')"
+  if [ -n "${TOK:-}" ] && printf '%s\n' "$STAGED" | grep -qF "$TOK"; then
+    echo "pre-commit: отказ — значение токена из .env найдено в staged-изменениях." >&2
+    fail=1
+  fi
+fi
+
+exit "$fail"

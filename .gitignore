@@ -3,3 +3,7 @@ __pycache__/
 .circle/
 .DS_Store
 .claude/
+
+# Телеметрия эффективности прогонов — секреты и данные, НИКОГДА в VCS (см. README «Телеметрия»).
+.env
+.telemetry/
