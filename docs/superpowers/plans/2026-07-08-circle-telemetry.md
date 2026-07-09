@@ -1,5 +1,13 @@
 # Circle Telemetry Implementation Plan
 
+> **⚠️ ЗАМЕЩЁН РЕАЛИЗАЦИЕЙ (as-built, 2026-07-09).** Транспорт изменён по решению владельца:
+> вместо git-репо статистики + rsync — **HTTP-приёмник** `scripts/telemetry_server.py` (systemd
+> `circle-telemetry.service` в контейнере-базе) + клиент `send`/`activate` (bearer-токен из `.env`
+> проекта, outbox-ledger). **Канал friction-самоотчёта executor'а (Task 4/8) ВЫРЕЗАН** — он тратил
+> токены сессии; остался только детерминированный скелет. Задачи 1–3 (`ident`/гейт/парс),
+> 5 (`record-phase`), 6 (`build-run`/scrub) реализованы как описано (без `stat-tag`/`stat-count`).
+> Актуальная картина — в `README.md` «Телеметрия эффективности» и `CLAUDE.md`. Ниже — исходный план.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Собирать безопасную (ноль утечки) структурную статистику эффективности пофазных прогонов circle-skill, консолидировать её в приватный git-репо и давать LLM-аналитику данные для предложений по ускорению плагина.

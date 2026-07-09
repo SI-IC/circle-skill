@@ -34,6 +34,16 @@
   сек (по умолч. 5) main пишет в лог строку `CIRCLE_PROGRESS: контекст N% · <label>` — по ней видно, что
   сессия жива и сколько контекста съела (нет статус-бара → `контекст ?`). Метку фазы даёт цикл (`--label`).
 - `scripts/executor-prompt.md` — шаблон промпта фазы-исполнителя (@@-плейсхолдеры).
+- `scripts/circle_telemetry.py` — **опциональная** телеметрия эффективности (off по умолчанию; off не меняет
+  поведение цикла). Детерминированный сбор (ноль LLM-токенов): HMAC-идентификаторы, fail-closed
+  whitelist-скраб, покрытие манифеста из git-дифа (пути не покидают процесс), сборка одного conflict-free
+  JSON на прогон; клиент `send` (urllib) шлёт его на приёмник с bearer, outbox-ledger догоняет неотправленное.
+  Врезка в `circle-loop.sh`: per-phase `record-phase`, финал `build-run`+`send`, строка `телеметрия: …`.
+  Конфиг — из `.env` **проекта** (`CIRCLE_TELEMETRY_URL`/`_TOKEN`/`_SALT`), активация — `/circle-telemetry`.
+- `scripts/telemetry_server.py` — приёмник в контейнере-базе (systemd `circle-telemetry.service`, порт 3000,
+  переживает рестарт; ставит `telemetry-server-install.sh`): bearer-auth, size-cap, повторный fail-closed
+  скраб, дедуп по `run_uuid`, store под gitignore. `scripts/telemetry_analyze.py` — учёт разобранных записей
+  (`fresh`/`mark`). Токен и данные НИКОГДА в VCS (`.env`/`.telemetry/` gitignored + pre-commit guard). См. README «Телеметрия».
 
 Только подписка, не API: фазы — настоящие интерактивные сессии под PTY, не `claude -p`.
 
