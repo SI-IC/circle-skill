@@ -105,6 +105,18 @@ TELE_ENABLED="no"
 [ -n "$TELE_URL" ] && [ -n "$TELE_TOKEN" ] && TELE_ENABLED="yes"
 [ "$TELE_ENABLED" = "yes" ] && log "телеметрия включена (приёмник: $TELE_URL)"
 
+# Стабильный per-run идентификатор и момент старта — персистятся в work-dir и переживают рестарты
+# цикла (после hang владелец перезапускает). Один run_uuid на весь прогон → снимки склеиваются на
+# приёмнике (overwrite-last), а run_wall_s меряет кумулятивное время прогона, не только последней сессии.
+if [ "$TELE_ENABLED" = "yes" ]; then
+  mkdir -p "$WORK/run-stats"
+  RUN_UUID_FILE="$WORK/run-stats/run_uuid"
+  [ -s "$RUN_UUID_FILE" ] || "$PY" -c 'import uuid; print(uuid.uuid4().hex[:12])' > "$RUN_UUID_FILE"
+  RUN_UUID="$(cat "$RUN_UUID_FILE")"
+  RUN_START_FILE="$WORK/run-stats/run_started"
+  [ -s "$RUN_START_FILE" ] || date +%s > "$RUN_START_FILE"
+fi
+
 # Сторож инварианта «done ⇒ закоммичено». К этому моменту сессия уже завершилась и должна была
 # закоммитить свою работу сама. Признак коммита — СДВИГ HEAD за время сессии ($2 — HEAD до неё), а не
 # просто чистота дерева: pre-commit хук-форматтер (`prettier --write` и т. п.) может оставить residue
@@ -136,7 +148,10 @@ sed_escape(){ printf '%s' "$1" | sed 's/[&\\|]/\\&/g'; }
 STOP_REASON="complete"
 LAST_PHASE=""
 SAME_COUNT=0
-SESSIONS=0  # число запущенных сессий за прогон (для телеметрии)
+SESSIONS=0  # число запущенных сессий за прогон (для телеметрии; персистится → переживает рестарт,
+            # чтобы финальный склеенный снимок нёс кумулятивный счёт, а не только последней инвокации)
+SESSIONS_FILE="$WORK/run-stats/sessions"
+if [ "$TELE_ENABLED" = "yes" ] && [ -s "$SESSIONS_FILE" ]; then SESSIONS="$(cat "$SESSIONS_FILE")"; fi
 
 # Инвариант: circle_plan.py next МОЖЕТ вернуть in_progress-фазу (резюм). Если сессия каждый раз
 # меняет план косметически, но не закрывает фазу, hash-гард не срабатывает — поэтому backstop:
@@ -187,6 +202,7 @@ while true; do
   [ "$COMMIT_ENABLED" = "yes" ] && HEAD_BEFORE="$(git -C "$COMMIT_REPO" rev-parse HEAD 2>/dev/null || true)"
   # Предсессионные замеры телеметрии (детерминированные, best-effort).
   SESSIONS=$((SESSIONS + 1))
+  if [ "$TELE_ENABLED" = "yes" ]; then printf '%s\n' "$SESSIONS" > "$SESSIONS_FILE"; fi
   PHASE_START=$(date +%s)
   TELE_HEAD_BEFORE=""; PHASES_BEFORE=0
   if [ "$TELE_ENABLED" = "yes" ]; then
@@ -266,9 +282,11 @@ try:
     c=json.load(sys.stdin).get("counts",{}); print(",".join("%s=%s"%(k,v) for k,v in c.items()))
 except Exception:
     print("")' 2>/dev/null || echo)"
+  RUN_WALL=$(( $(date +%s) - $(cat "$WORK/run-stats/run_started" 2>/dev/null || date +%s) ))
+  [ "$RUN_WALL" -lt 0 ] && RUN_WALL=0
   CIRCLE_TELEMETRY_SALT="$TELE_SALT" "$PY" "$TELEMETRY" build-run "$PLAN" --work "$WORK" --out-dir "$WORK/run-stats/outbox" \
     --plugin-version "$PLUGIN_VER" --stop-reason "$STOP_REASON" \
-    --run-wall-s 0 --sessions-total "$SESSIONS" --phases-total "$PHASES_TOTAL" \
+    --run-wall-s "$RUN_WALL" --run-uuid "${RUN_UUID:-}" --sessions-total "$SESSIONS" --phases-total "$PHASES_TOTAL" \
     --status-counts "$STATUS_CSV" 2>>"$LOG" || log "телеметрия build-run: ошибка (best-effort)"
   # Токен — через env дочернего процесса, НЕ через argv (иначе виден в ps/proc).
   TELE_STATUS="$(CIRCLE_TELEMETRY_TOKEN="$TELE_TOKEN" "$PY" "$TELEMETRY" send --work "$WORK" --url "$TELE_URL" 2>>"$LOG" || echo 'отправлено=0 не_отправлено=? причина=ошибка')"

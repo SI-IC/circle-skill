@@ -80,12 +80,35 @@ class TestServer(unittest.TestCase):
         with open(os.path.join(self.store, files[0])) as f:
             self.assertEqual(json.load(f)["stop_reason"], "complete")
 
-    def test_ingest_dedup_idempotent(self):
-        self.assertEqual(self._req("/ingest", body=_valid_record())[0], 201)
-        status, payload = self._req("/ingest", body=_valid_record())  # тот же uuid
+    def test_ingest_overwrite_last(self):
+        # Снимки одного прогона (тот же run_uuid) склеиваются: последний выигрывает, файл один.
+        first = _valid_record()
+        first["stop_reason"] = "hang"
+        self.assertEqual(self._req("/ingest", body=first)[0], 201)
+        later = _valid_record()  # тот же uuid, но прогон уже complete и с большим числом фаз
+        later["phases"] = [
+            {"ordinal": 10, "outcome": "done", "files_changed": 1},
+            {"ordinal": 20, "outcome": "done", "files_changed": 2},
+        ]
+        status, payload = self._req("/ingest", body=later)
         self.assertEqual(status, 200)
-        self.assertTrue(payload["duplicate"])
-        self.assertEqual(len(os.listdir(self.store)), 1)
+        self.assertTrue(payload["updated"])
+        files = os.listdir(self.store)
+        self.assertEqual(len(files), 1)
+        with open(os.path.join(self.store, files[0])) as f:
+            data = json.load(f)
+        self.assertEqual(data["stop_reason"], "complete")  # финальный снимок победил
+        self.assertEqual(len(data["phases"]), 2)
+
+    def test_overwrite_keys_on_exact_ids_not_just_uuid(self):
+        # Склейка — по точному триплету (machine+plan+uuid), не по одному uuid: запись с тем же
+        # run_uuid, но иным machine_id (другой продюсер) НЕ затирает чужую — пишется отдельным файлом.
+        a = _valid_record()
+        b = _valid_record()
+        b["machine_id"] = "ffffffffffffffff"  # иной продюсер, тот же uuid
+        self.assertEqual(self._req("/ingest", body=a)[0], 201)
+        self.assertEqual(self._req("/ingest", body=b)[0], 201)  # не 200/updated — новый файл
+        self.assertEqual(len(os.listdir(self.store)), 2)
 
     def test_ingest_bad_token(self):
         self.assertEqual(self._req("/ingest", body=_valid_record(), token="nope")[0], 401)

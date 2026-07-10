@@ -10,12 +10,11 @@ store под gitignore. Потребитель store — LLM-аналитик п
   2) кап на размер тела — иначе 413;
   3) JSON-парс + формальная валидация опаковых полей (run_uuid/hash-иды) — иначе 400;
   4) повторный fail-closed scrub_record (тот же, что на продюсере) — иначе 400;
-  5) дедуп по run_uuid — повторная доставка идемпотентна (200, не плодит дубли).
+  5) склейка по run_uuid (overwrite-last) — снимки одного прогона схлопываются, финальный выигрывает.
 
 Только stdlib (http.server). Порт по умолчанию 3000 / bind 0.0.0.0 — проксируется публичным
 preview-URL контейнера, доступен и внешним машинам, и on-platform.
 """
-import glob
 import hmac
 import importlib.util
 import json
@@ -101,18 +100,22 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(400, {"error": "scrub_failed"})
         if not clean:
             return self._reply(400, {"error": "scrub_failed"})
-        # дедуп по run_uuid — идемпотентно
+        # склейка по run_uuid — overwrite-last: снимки одного прогона (после hang → рестарт цикла
+        # шлёт тот же стабильный run_uuid с накопленными фазами) схлопываются в одну запись, финальный
+        # снимок выигрывает. Повторная доставка того же — идемпотентный перезапись-в-себя.
         store = self.server.store_dir
         os.makedirs(store, exist_ok=True)
         uuid = rec["run_uuid"]
-        if glob.glob(os.path.join(store, "*-%s.json" % uuid)):
-            return self._reply(200, {"ok": True, "duplicate": True})
+        # Ключ склейки — ТОЧНОЕ имя (machine+plan+uuid), не широкий glob по uuid: overwrite схлопывает
+        # только истинные снимки одного прогона (та же work-dir → тот же триплет), а коллизия uuid от
+        # другого продюсера пишется отдельным файлом, а не затирает чужую запись.
         name = "%s-%s-%s.json" % (rec["machine_id"], rec["plan_id"], uuid)
+        existed = os.path.exists(os.path.join(store, name))
         tmp = os.path.join(store, name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(rec, f, ensure_ascii=False, indent=2)
         os.replace(tmp, os.path.join(store, name))
-        self._reply(201, {"ok": True})
+        self._reply(200 if existed else 201, {"ok": True, "updated": existed})
 
 
 class TelemetryServer(ThreadingHTTPServer):

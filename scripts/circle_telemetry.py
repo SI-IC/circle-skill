@@ -18,19 +18,16 @@ import re
 import socket
 import uuid
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 STOP_REASONS = frozenset({"complete", "no-progress", "hang", "crash", "error", "stuck"})
 OUTCOMES = frozenset({"done", "blocked", "no-change", "skipped", "crash", "error"})
 STATUS_KINDS = frozenset({"pending", "in_progress", "done", "blocked", "skipped"})
 AUTONOMY_KINDS = frozenset({"auto", "needs-human"})
 
-# Заголовок фазы — как HEADING_RE в circle_plan.py (допускает em-dash И дефис).
-_HEADING_RE = re.compile(r"^##\s+Фаза\s+(\S+)\s+[—-]\s+(.+?)\s*$")
-_MANIFEST_RE = re.compile(r"файловый манифест", re.IGNORECASE)
 _MAP_RE = re.compile(r"^##\s+Карта кодовой базы", re.IGNORECASE | re.MULTILINE)
-_BULLET_PATH_RE = re.compile(r"^\s*[-*]\s+`([^`]+)`")
 _STRING_RE = re.compile(r"[0-9a-z._-]{1,40}")
+_RUN_UUID_RE = re.compile(r"\A[0-9a-f]{12}\Z")
 
 
 # --- идентификаторы -----------------------------------------------------------
@@ -69,45 +66,6 @@ def string_ok(s):
 
 # --- парс плана (только счётчики; пути живут и умирают в процессе) -------------
 
-def phase_body(text, phase_id):
-    lines = text.splitlines()
-    start = None
-    for i, ln in enumerate(lines):
-        m = _HEADING_RE.match(ln)
-        if m and m.group(1) == phase_id:
-            start = i + 1
-            break
-    if start is None:
-        return ""
-    end = next(
-        (j for j in range(start, len(lines)) if lines[j].startswith("## ")), len(lines)
-    )
-    return "\n".join(lines[start:end])
-
-
-def manifest_paths(text, phase_id):
-    """Множество путей из секции «Файловый манифест» тела фазы. Только для пересечения
-    в памяти — наружу уходит лишь количество, пути не сериализуются."""
-    body = phase_body(text, phase_id)
-    if not body:
-        return set()
-    lines = body.splitlines()
-    sec = next(
-        (i for i, ln in enumerate(lines) if ln.startswith("#") and _MANIFEST_RE.search(ln)),
-        None,
-    )
-    if sec is None:
-        return set()
-    paths = set()
-    for ln in lines[sec + 1:]:
-        if ln.startswith("#"):
-            break
-        m = _BULLET_PATH_RE.match(ln)
-        if m:
-            paths.add(m.group(1).strip())
-    return paths
-
-
 def has_codebase_map(text):
     return bool(_MAP_RE.search(text))
 
@@ -143,11 +101,9 @@ def _append_line(path, line):
 def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, outcome,
                  plan_changed, committed, deps_count, autonomy, subphases_added,
                  touched_paths):
-    """Детерминированный скелет фазы: счётчики покрытия манифеста (пересечение в памяти),
-    длительность, попытки, флаги. Дописывает JSON-строку в <work>/run-stats/phases.jsonl."""
-    declared = manifest_paths(plan_text, phase_id)
+    """Детерминированный скелет фазы: длительность, попытки, число изменённых файлов, флаги.
+    Дописывает JSON-строку в <work>/run-stats/phases.jsonl."""
     touched = set(touched_paths)
-    ratio = round(len(touched & declared) / len(touched), 3) if touched else 0.0
     rec = {
         "ordinal": clamp_int(ordinal, 0, 100000),
         "attempts": clamp_int(attempts, 0, 1000),
@@ -159,10 +115,6 @@ def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, ou
         "autonomy": check_enum(autonomy, AUTONOMY_KINDS),
         "subphases_added": clamp_int(subphases_added, 0, 1000),
         "files_changed": len(touched),
-        "manifest_declared": len(declared),
-        "files_off_manifest": len(touched - declared),
-        "manifest_declared_untouched": len(declared - touched),
-        "coverage_ratio": ratio,
         "journal_digest_bytes": _journal_bytes(plan_text),
     }
     _append_line(os.path.join(_run_stats_dir(work), "phases.jsonl"),
@@ -193,7 +145,8 @@ def _drop_none(d):
 
 
 def build_run_record(*, plan_text, plugin_version, machine, plan_slug, salt, stop_reason,
-                     run_wall_s, sessions_total, phases_total, status_counts, phase_recs):
+                     run_wall_s, sessions_total, phases_total, status_counts, phase_recs,
+                     run_uuid=None):
     """Собирает ОДИН conflict-free словарь прогона из фиксированной схемы. Обязательный enum
     вне словаря → None (fail-closed). Скраб не прошёл → None. Иначе — готовая безопасная запись."""
     stop = check_enum(stop_reason, STOP_REASONS)
@@ -212,7 +165,8 @@ def build_run_record(*, plan_text, plugin_version, machine, plan_slug, salt, sto
         "plugin_version": plugin_version if string_ok(plugin_version) else "0",
         "machine_id": ident(machine, salt),
         "plan_id": ident(plan_slug, salt),
-        "run_uuid": uuid.uuid4().hex[:12],
+        "run_uuid": run_uuid if (isinstance(run_uuid, str) and _RUN_UUID_RE.match(run_uuid))
+                    else uuid.uuid4().hex[:12],
         "stop_reason": stop,
         "run_wall_s": clamp_int(run_wall_s, 0, 10 ** 8),
         "sessions_total": clamp_int(sessions_total, 0, 100000),
@@ -384,6 +338,7 @@ def main(argv=None):
     p.add_argument("--plugin-version", default="0")
     p.add_argument("--stop-reason", required=True)
     p.add_argument("--run-wall-s", default=0)
+    p.add_argument("--run-uuid", default="")
     p.add_argument("--sessions-total", default=0)
     p.add_argument("--phases-total", default=0)
     p.add_argument("--status-counts", default="")
@@ -422,6 +377,7 @@ def main(argv=None):
             plan_text=plan_text, plugin_version=a.plugin_version,
             machine=socket.gethostname(), plan_slug=os.path.basename(a.plan),
             salt=salt, stop_reason=a.stop_reason, run_wall_s=a.run_wall_s,
+            run_uuid=(a.run_uuid or None),
             sessions_total=a.sessions_total, phases_total=a.phases_total,
             status_counts=_parse_status_counts(a.status_counts),
             phase_recs=_load_phase_recs(a.work),

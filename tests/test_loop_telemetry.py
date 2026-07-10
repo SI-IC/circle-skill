@@ -93,6 +93,22 @@ class TestLoopTelemetry(unittest.TestCase):
         summary = open(os.path.join(os.path.dirname(plan), ".circle", "plan", "summary.txt")).read()
         self.assertIn("телеметрия: отправлено=1", summary)
 
+    def test_restart_keeps_run_uuid_and_sessions(self):
+        # Рестарт цикла на том же плане (work-dir сохранён): все фазы уже done → 0 новых сессий,
+        # но стабильный run_uuid + overwrite-last дают ОДНУ запись, а sessions_total переживает
+        # рестарт (не сбрасывается в 0). Регресс для hang→рестарт-случая.
+        plan, d = self._git_plan()
+        self.assertEqual(self._run(plan).returncode, 0)
+        first = os.listdir(self.store)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(self._run(plan).returncode, 0)  # рестарт
+        second = os.listdir(self.store)
+        self.assertEqual(len(second), 1, "overwrite-last: снимки склеились в одну запись")
+        self.assertEqual(second[0], first[0], "run_uuid стабилен между рестартами")
+        with open(os.path.join(self.store, second[0])) as f:
+            rec = json.load(f)
+        self.assertEqual(rec["sessions_total"], 2, "sessions_total пережил рестарт (не сброшен)")
+
     def test_offline_receiver_keeps_outbox_no_crash(self):
         # приёмник недоступен → send падает мягко, цикл завершается, запись ждёт в outbox
         plan, d = self._git_plan()

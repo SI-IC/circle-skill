@@ -84,33 +84,7 @@ class TestGate(unittest.TestCase):
         self.assertFalse(tele.string_ok('"quoted"'))
 
 
-class TestHeadingParity(unittest.TestCase):
-    def test_heading_regex_matches_circle_plan(self):
-        # _HEADING_RE скопирован из circle_plan.HEADING_RE; при расхождении manifest_declared
-        # молча обнулился бы. Этот тест падает, если форматы заголовка фазы разошлись.
-        spec = importlib.util.spec_from_file_location(
-            "circle_plan",
-            Path(__file__).resolve().parent.parent / "scripts" / "circle_plan.py",
-        )
-        cp = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cp)
-        self.assertEqual(tele._HEADING_RE.pattern, cp.HEADING_RE.pattern)
-
-
 class TestParsing(unittest.TestCase):
-    def test_manifest_paths(self):
-        self.assertEqual(
-            tele.manifest_paths(_PLAN, "1"),
-            {"scripts/circle_plan.py", "tests/test_plan.py"},
-        )
-
-    def test_manifest_absent_is_empty(self):
-        self.assertEqual(tele.manifest_paths(_PLAN, "2"), set())
-
-    def test_phase_body_accepts_hyphen_heading(self):
-        # «## Фаза 2 - Вторая» с дефисом должна находиться (не только em-dash).
-        self.assertIn("Без манифеста", tele.phase_body(_PLAN, "2"))
-
     def test_has_codebase_map(self):
         self.assertTrue(tele.has_codebase_map(_PLAN))
         self.assertFalse(tele.has_codebase_map("# План\n## Фаза 1 — X\n"))
@@ -120,7 +94,7 @@ class TestRecordPhase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
 
-    def test_manifest_coverage_counts_not_paths(self):
+    def test_files_changed_counts_not_paths(self):
         rec = tele.record_phase(
             self.tmp, _PLAN, "1",
             ordinal=10, attempts=1, duration_s=42, outcome="done",
@@ -128,12 +102,12 @@ class TestRecordPhase(unittest.TestCase):
             subphases_added=0,
             touched_paths=["scripts/circle_plan.py", "scripts/new_blind.py"],
         )
-        self.assertEqual(rec["manifest_declared"], 2)
         self.assertEqual(rec["files_changed"], 2)
-        self.assertEqual(rec["files_off_manifest"], 1)
-        self.assertEqual(rec["manifest_declared_untouched"], 1)
-        self.assertAlmostEqual(rec["coverage_ratio"], 0.5)
         self.assertNotIn("new_blind.py", json.dumps(rec))  # путь НЕ в записи
+        # мёртвые манифест-поля удалены из схемы v2 (всегда были 0 — покрытие не считалось)
+        for k in ("manifest_declared", "files_off_manifest",
+                  "manifest_declared_untouched", "coverage_ratio"):
+            self.assertNotIn(k, rec)
 
     def test_bad_outcome_enum_dropped(self):
         rec = tele.record_phase(
@@ -186,6 +160,23 @@ class TestScrubAndBuild(unittest.TestCase):
         self.assertRegex(rec["run_uuid"], r"\A[0-9a-f]{12}\Z")
         self.assertTrue(rec["has_codebase_map"])
         self.assertEqual(rec["status_counts"], {"done": 2})
+
+    def test_build_run_uuid_override(self):
+        # Валидный переданный run_uuid используется как есть (склейка снимков одного прогона на
+        # приёмнике); мусорный/инъекционный — игнорируется, генерится свежий.
+        rec = tele.build_run_record(
+            plan_text=_PLAN, plugin_version="1.2.3", machine="host", plan_slug="p",
+            salt="s", stop_reason="complete", run_wall_s=1, sessions_total=1,
+            phases_total=1, status_counts={}, phase_recs=[], run_uuid="abcdef012345",
+        )
+        self.assertEqual(rec["run_uuid"], "abcdef012345")
+        bad = tele.build_run_record(
+            plan_text=_PLAN, plugin_version="1.2.3", machine="host", plan_slug="p",
+            salt="s", stop_reason="complete", run_wall_s=1, sessions_total=1,
+            phases_total=1, status_counts={}, phase_recs=[], run_uuid="../evil",
+        )
+        self.assertRegex(bad["run_uuid"], r"\A[0-9a-f]{12}\Z")
+        self.assertNotEqual(bad["run_uuid"], "../evil")
 
     def test_build_fail_closed_on_leaked_phase(self):
         rec = tele.build_run_record(

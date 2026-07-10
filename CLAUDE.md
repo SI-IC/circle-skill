@@ -36,15 +36,16 @@
 - `scripts/executor-prompt.md` — шаблон промпта фазы-исполнителя (@@-плейсхолдеры).
 - `scripts/circle_telemetry.py` — **опциональная** телеметрия эффективности (off по умолчанию; off не меняет
   поведение цикла). Детерминированный сбор (ноль LLM-токенов): HMAC-идентификаторы, fail-closed
-  whitelist-скраб, покрытие манифеста из git-дифа (пути не покидают процесс), сборка одного conflict-free
-  JSON на прогон; клиент `send` (urllib) шлёт его на приёмник с bearer, outbox-ledger догоняет неотправленное.
+  whitelist-скраб, число изменённых файлов из git-дифа (пути не покидают процесс), сборка одного conflict-free
+  JSON на прогон со стабильным `run_uuid` (персистится в work-dir → снимки прогона склеиваются на приёмнике)
+  и реальным `run_wall_s`; клиент `send` (urllib) шлёт его на приёмник с bearer, outbox-ledger догоняет неотправленное.
   Врезка в `circle-loop.sh`: per-phase `record-phase`, финал `build-run`+`send`, строка `телеметрия: …`.
   Конфиг — из `.env` **проекта** (`CIRCLE_TELEMETRY_URL`/`_TOKEN`/`_SALT`), активация — `/circle-skill:circle-telemetry`
   (команда делегирует в `scripts/telemetry-client.sh`; логика вынесена из inline-`bash -c` в файл, иначе
   литеральные кавычки рвали обрамление).
 - `scripts/telemetry_server.py` — приёмник в контейнере-базе (systemd `circle-telemetry.service`, порт 3000,
   переживает рестарт; ставит `telemetry-server-install.sh`): bearer-auth, size-cap, повторный fail-closed
-  скраб, дедуп по `run_uuid`, store под gitignore. `scripts/telemetry_analyze.py` — учёт разобранных записей
+  скраб, склейка по `run_uuid` (overwrite-last: финальный снимок прогона выигрывает), store под gitignore. `scripts/telemetry_analyze.py` — учёт разобранных записей
   (`fresh`/`mark`). Токен и данные НИКОГДА в VCS (`.env`/`.telemetry/` gitignored + pre-commit guard). См. README «Телеметрия».
 
 Только подписка, не API: фазы — настоящие интерактивные сессии под PTY, не `claude -p`.
