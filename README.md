@@ -192,9 +192,17 @@ bash scripts/telemetry-server-install.sh   # systemd-сервис, порт 3000
 
 ### Анализ (в контейнере-базе)
 
-`python3 scripts/telemetry_analyze.py fresh` — какие записи ещё не разобраны; попроси Claude
-разобрать `.telemetry/runs/<свежие>.json` и сформулировать предложения; затем
-`python3 scripts/telemetry_analyze.py mark` отметит их разобранными.
+Локальная команда **`/circle-analyze`** — front-door разбора: дёргает `fresh`, отдаёт свежие записи
+Claude на анализ и выдаёт рекомендации двумя корзинами (эффективность цикла / улучшение сбора);
+внедрение правок и `mark` — только после твоего одобрения. Команда лежит в `.claude/commands/`
+приёмного контейнера (gitignored) и в пакет плагина не входит — в проектах, где плагин используется,
+её нет. Канонический источник — `scripts/circle-analyze.command.md` (коммитится, но командой не
+становится: команды берутся только из `commands/` и `.claude/commands/`); `telemetry-server-install.sh`
+разворачивает его в `.claude/commands/`, так что команда переживает пересоздание контейнера.
+
+Под капотом — тот же ledger: `python3 scripts/telemetry_analyze.py fresh` показывает, какие записи
+ещё не разобраны, `python3 scripts/telemetry_analyze.py mark` отмечает их разобранными (эти же шаги
+можно вызвать вручную, без команды).
 
 ## Тесты
 

@@ -26,6 +26,16 @@ if ! grep -qE '^[[:space:]]*CIRCLE_TELEMETRY_STORE[[:space:]]*=' "$ENV_FILE"; th
 fi
 mkdir -p "$STORE"
 
+# 1b) Локальная команда-аналитик /circle-analyze (front-door разбора свежей телеметрии).
+# Разворачивается в .claude/commands/ приёмника — gitignored, в пакет плагина НЕ входит, у
+# потребителей её нет. Источник scripts/circle-analyze.command.md шипается, но командой не
+# становится (команды берутся только из commands/ и .claude/commands/). Filesystem-only, без sudo.
+# Идемпотентно: cp перезаписывает — переживает пересоздание контейнера при повторной установке.
+CMD_DST="$REPO/.claude/commands"
+mkdir -p "$CMD_DST"
+cp "$REPO/scripts/circle-analyze.command.md" "$CMD_DST/circle-analyze.md"
+echo "команда /circle-analyze развёрнута → $CMD_DST/circle-analyze.md"
+
 # 2) systemd unit. EnvironmentFile=.env → токен вне unit-файла. Restart=always.
 sudo tee "$UNIT" >/dev/null <<UNIT_EOF
 [Unit]
