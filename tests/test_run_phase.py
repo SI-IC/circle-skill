@@ -312,6 +312,25 @@ class TestContextOut(unittest.TestCase):
         )
         self.assertEqual(open(ctxf, encoding="utf-8").read().strip(), "")
 
+    def test_context_diag_logged_when_bar_unparsed(self):
+        # Бар-подобный вывод, где «N% |» не распознан → в лог кладём CIRCLE_CTX_UNPARSED
+        # (локально, НЕ в телеметрию), чтобы регэксп чинить по реальной строке, а не гадать.
+        ctxf = os.path.join(self.d, "context-pct")
+        log = os.path.join(self.d, "loop.log")
+        child = [
+            sys.executable, "-c",
+            "import sys\n"
+            "sys.stdout.write('[m] bar 42% x | main\\n'); sys.stdout.flush()\n"
+            f"open({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')\n",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "10",
+             "--log", log, "--context-out", ctxf, "--", *child],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(open(ctxf, encoding="utf-8").read().strip(), "")
+        self.assertIn("CIRCLE_CTX_UNPARSED", open(log, encoding="utf-8").read())
+
 
 class TestLogFilter(unittest.TestCase):
     def _run(self, *chunks):
@@ -408,6 +427,31 @@ class TestLogFilter(unittest.TestCase):
     def test_context_peak_none_when_never_seen(self):
         f = self._filter(b"no statusbar here\n")
         self.assertIsNone(f.ctx_peak)
+
+    def test_context_diag_captures_drifted_barlike_frame(self):
+        # Бар-подобный кадр («%» и «|» в одном кадре), но «N% |» не сматчился — вероятный
+        # дрейф формата статус-бара: копим образец для локальной диагностики, ctx не выставлен.
+        f = self._filter("[Opus] ░░░ 42% ⏱ | main\n".encode())
+        self.assertIsNone(f.ctx_peak)
+        self.assertEqual(len(f.ctx_diag), 1)
+        self.assertIn(b"42%", f.ctx_diag[0])
+
+    def test_context_diag_empty_when_bar_parses(self):
+        # Распознанный бар → диагностику не копим (чинить нечего).
+        f = self._filter(b"bar 42% | t\n")
+        self.assertEqual(f.ctx_peak, 42)
+        self.assertEqual(f.ctx_diag, [])
+
+    def test_context_diag_ignores_plain_percent_text(self):
+        # «%» в тексте без «|» — не кандидат в статус-бар, диагностику не засоряет.
+        f = self._filter(b"progress 50% complete\n")
+        self.assertEqual(f.ctx_diag, [])
+
+    def test_context_diag_bounded_and_deduped(self):
+        # Копим не больше _CTX_DIAG_MAX разных кадров; подряд-дубли и так гаснут раньше.
+        f = self._filter(*[("v%d%% x | b\n" % i).encode() for i in range(20)])
+        self.assertIsNone(f.ctx_peak)
+        self.assertLessEqual(len(f.ctx_diag), rp._LogFilter._CTX_DIAG_MAX)
 
 
 class TestProgressLine(unittest.TestCase):

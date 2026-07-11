@@ -28,6 +28,10 @@ _ANSI_RE = re.compile(
 # Потребление контекста сессии из нижнего статус-бара TUI: «… N% | ⏱ …». Берём число перед
 # `%|`-разделителем — это заякорено на статус-строку и не ловит случайный `%` в тексте сообщения.
 _CTX_RE = re.compile(rb"(\d+)%\s*\|")
+# Кандидат-в-статус-бар: «%» и «|» в одном кадре, но НЕ в форме «N% |». Если за сессию бар так
+# ни разу и не распознан — такие кадры сигналят о ВЕРОЯТНОМ дрейфе формата бара (версия TUI /
+# ANSI-мусор между % и |). Их образцы кладём в лог для починки _CTX_RE по реальной строке.
+_CTX_DIAG_RE = re.compile(rb"%.*\|")
 
 
 class _LogFilter:
@@ -42,6 +46,7 @@ class _LogFilter:
     содержательно отличающиеся кадры сохраняются — лог остаётся пригодным для пост-мортема."""
 
     _MAX_FRAME = 1 << 20  # страховка: кадр без терминатора не должен расти бесконечно
+    _CTX_DIAG_MAX = 5  # сколько разных нераспознанных бар-подобных кадров удержать для диагностики
 
     def __init__(self, fh):
         self.fh = fh
@@ -49,6 +54,7 @@ class _LogFilter:
         self.last = None
         self.ctx = None  # последнее замеченное потребление контекста, % (None — ещё не видели)
         self.ctx_peak = None  # пик потребления контекста за сессию, % (для телеметрии)
+        self.ctx_diag = []  # образцы бар-подобных кадров с нераспознанным `N% |` (дрейф формата)
 
     def feed(self, data):
         self.buf += data
@@ -70,6 +76,9 @@ class _LogFilter:
             self.ctx = int(m.group(1))
             if self.ctx_peak is None or self.ctx > self.ctx_peak:
                 self.ctx_peak = self.ctx
+        elif (len(self.ctx_diag) < self._CTX_DIAG_MAX
+              and _CTX_DIAG_RE.search(clean) and clean not in self.ctx_diag):
+            self.ctx_diag.append(clean)  # бар-подобный кадр, но `N% |` не сматчился
         self.fh.write(clean + b"\n")
         self.fh.flush()
 
@@ -299,6 +308,13 @@ def main(argv=None):
                     cf.write("" if peak is None else str(peak))
             except OSError:
                 pass
+        if logf and logfilter and logfilter.ctx_peak is None and logfilter.ctx_diag:
+            # Бар ни разу не распознан, но были бар-подобные кадры → вероятен дрейф формата
+            # статус-бара. Образцы кладём В ЛОГ (локально, НЕ в телеметрию: кадр может нести
+            # пути/ветки), чтобы _CTX_RE чинить по реальной строке, а не гадать вслепую.
+            for frame in logfilter.ctx_diag:
+                logf.write(b"CIRCLE_CTX_UNPARSED: " + frame + b"\n")
+            logf.flush()
         if logf:
             logf.close()
         try:

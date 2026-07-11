@@ -120,7 +120,9 @@ def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, ou
 
     context_pct — пик потребления контекстного окна сессией, % (0..100); None если статус-бар
     не распознан. Отвечает на «фаза пухлая или просто долгая?»: duration_s меряет время, а это —
-    именно нагрузку на контекст, независимую ось."""
+    именно нагрузку на контекст, независимую ось. Важно при разборе: None при БОЛЬШОМ duration_s
+    (живой TUI рисует бар непрерывно) ⇒ извлечение сломано (дрейф формата бара), а не низкая
+    нагрузка — образец нераспознанного кадра ищи в loop.log по `CIRCLE_CTX_UNPARSED`."""
     touched = set(touched_paths)
     rec = {
         "ordinal": clamp_int(ordinal, 0, 100000),
@@ -167,7 +169,12 @@ def build_run_record(*, plan_text, plugin_version, machine, plan_slug, salt, sto
                      run_wall_s, sessions_total, phases_total, status_counts, phase_recs,
                      run_uuid=None):
     """Собирает ОДИН conflict-free словарь прогона из фиксированной схемы. Обязательный enum
-    вне словаря → None (fail-closed). Скраб не прошёл → None. Иначе — готовая безопасная запись."""
+    вне словаря → None (fail-closed). Скраб не прошёл → None. Иначе — готовая безопасная запись.
+
+    Семантика для аналитика: `phases` — фазы, ИСПОЛНЁННЫЕ в этом прогоне (по одной записи из
+    phases.jsonl), тогда как `phases_total`/`status_counts` — финальное состояние ВСЕГО плана.
+    Потому `len(phases) < phases_total` — норма, не потеря данных: уже-`done` до старта и `skipped`
+    фазы сессиями не исполняются. Простой прогона выводится как `run_wall_s − Σ duration_s`."""
     stop = check_enum(stop_reason, STOP_REASONS)
     if stop is None:
         return None
