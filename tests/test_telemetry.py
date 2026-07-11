@@ -117,6 +117,35 @@ class TestRecordPhase(unittest.TestCase):
         )
         self.assertIsNone(rec.get("outcome"))
 
+    def test_context_pct_recorded_and_clamped(self):
+        rec = tele.record_phase(
+            self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,
+            outcome="done", plan_changed=True, committed=True,
+            deps_count=0, autonomy="auto", subphases_added=0, touched_paths=[],
+            context_pct="37",
+        )
+        self.assertEqual(rec["context_pct"], 37)
+        # вне диапазона зажимается, мусор/пусто → None (честное «неизвестно»)
+        self.assertEqual(
+            tele.record_phase(self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,
+                              outcome="done", plan_changed=True, committed=True, deps_count=0,
+                              autonomy="auto", subphases_added=0, touched_paths=[],
+                              context_pct="250")["context_pct"], 100)
+        for bad in ("", "?", "abc", None):
+            r = tele.record_phase(self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,
+                                  outcome="done", plan_changed=True, committed=True, deps_count=0,
+                                  autonomy="auto", subphases_added=0, touched_paths=[],
+                                  context_pct=bad)
+            self.assertIsNone(r["context_pct"], bad)
+
+    def test_context_pct_defaults_none_when_omitted(self):
+        rec = tele.record_phase(
+            self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,
+            outcome="done", plan_changed=True, committed=True,
+            deps_count=0, autonomy="auto", subphases_added=0, touched_paths=[],
+        )
+        self.assertIsNone(rec["context_pct"])
+
     def test_journal_bytes_positive(self):
         rec = tele.record_phase(
             self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,

@@ -18,7 +18,7 @@ import re
 import socket
 import uuid
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"  # v3: +context_pct на фазу (пик потребления контекста, %)
 
 STOP_REASONS = frozenset({"complete", "no-progress", "hang", "crash", "error", "stuck"})
 OUTCOMES = frozenset({"done", "blocked", "no-change", "skipped", "crash", "error"})
@@ -64,6 +64,20 @@ def string_ok(s):
     return isinstance(s, str) and bool(_STRING_RE.fullmatch(s))
 
 
+def _parse_context_pct(value):
+    """Пик потребления контекста, % → int в [0,100] или None. Пусто/'?'/нечисло → None
+    (честное «неизвестно», не 0 — иначе распознанный-как-0 и нераспознанный слились бы)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s == "?":
+        return None
+    try:
+        return max(0, min(100, int(s)))
+    except ValueError:
+        return None
+
+
 # --- парс плана (только счётчики; пути живут и умирают в процессе) -------------
 
 def has_codebase_map(text):
@@ -100,9 +114,13 @@ def _append_line(path, line):
 
 def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, outcome,
                  plan_changed, committed, deps_count, autonomy, subphases_added,
-                 touched_paths):
+                 touched_paths, context_pct=None):
     """Детерминированный скелет фазы: длительность, попытки, число изменённых файлов, флаги.
-    Дописывает JSON-строку в <work>/run-stats/phases.jsonl."""
+    Дописывает JSON-строку в <work>/run-stats/phases.jsonl.
+
+    context_pct — пик потребления контекстного окна сессией, % (0..100); None если статус-бар
+    не распознан. Отвечает на «фаза пухлая или просто долгая?»: duration_s меряет время, а это —
+    именно нагрузку на контекст, независимую ось."""
     touched = set(touched_paths)
     rec = {
         "ordinal": clamp_int(ordinal, 0, 100000),
@@ -116,6 +134,7 @@ def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, ou
         "subphases_added": clamp_int(subphases_added, 0, 1000),
         "files_changed": len(touched),
         "journal_digest_bytes": _journal_bytes(plan_text),
+        "context_pct": _parse_context_pct(context_pct),
     }
     _append_line(os.path.join(_run_stats_dir(work), "phases.jsonl"),
                  json.dumps(rec, ensure_ascii=False))
@@ -330,6 +349,7 @@ def main(argv=None):
     p.add_argument("--deps-count", default=0)
     p.add_argument("--autonomy", default="auto")
     p.add_argument("--subphases-added", default=0)
+    p.add_argument("--context-pct", default="")  # пик контекста, %; пусто = неизвестно
 
     p = sub.add_parser("build-run")
     p.add_argument("plan")
@@ -367,6 +387,7 @@ def main(argv=None):
             committed=(str(a.committed) not in ("0", "", "false", "False")),
             deps_count=a.deps_count, autonomy=a.autonomy,
             subphases_added=a.subphases_added, touched_paths=touched,
+            context_pct=a.context_pct,
         )
         return 0
 

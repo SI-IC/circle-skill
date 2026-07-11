@@ -8,7 +8,12 @@ PLAN="$(cd "$(dirname "$PLAN_IN")" && pwd)/$(basename "$PLAN_IN")"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 CLAUDE_BIN="${CIRCLE_CLAUDE_BIN:-claude}"
 PY="${CIRCLE_PYTHON:-python3}"
-TIMEOUT="${CIRCLE_TIMEOUT:-3600}"
+# Два дедлайна сессии (см. run_phase.py). IDLE — адаптивный детектор зависания по молчанию
+# PTY: живой claude тикает статус-баром даже во время долгого тула, поэтому «тишина дольше idle»
+# = завис, а не «фаза долгая». TIMEOUT — абсолютный потолок от runaway; большой, чтобы не рубить
+# здоровую-но-долгую фазу. Стоп даёт тот, что сработает раньше.
+TIMEOUT="${CIRCLE_TIMEOUT:-14400}"        # абсолютный потолок wall-clock, сек (4ч)
+IDLE_TIMEOUT="${CIRCLE_IDLE_TIMEOUT:-1800}"  # обрыв по простою PTY, сек (30мин); 0 = выкл
 MAX_SAME="${CIRCLE_MAX_SAME_PHASE:-3}"   # backstop: одна фаза подряд > N раз → стоп
 PLAN_CLI="$PLUGIN_ROOT/scripts/circle_plan.py"
 RUN_PHASE="$PLUGIN_ROOT/scripts/run_phase.py"
@@ -23,6 +28,7 @@ mkdir -p "$WORK"
 LOG="$WORK/loop.log"
 RESULT="$WORK/result"
 SUMMARY="$WORK/summary.txt"
+CTX_FILE="$WORK/context-pct"   # run_phase пишет сюда пик контекста сессии, % (для телеметрии)
 
 log(){ printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 
@@ -156,7 +162,7 @@ if [ "$TELE_ENABLED" = "yes" ] && [ -s "$SESSIONS_FILE" ]; then SESSIONS="$(cat 
 # Инвариант: circle_plan.py next МОЖЕТ вернуть in_progress-фазу (резюм). Если сессия каждый раз
 # меняет план косметически, но не закрывает фазу, hash-гард не срабатывает — поэтому backstop:
 # одна и та же фаза выбрана подряд > MAX_SAME раз → стоп (защита от бесконечного расхода).
-log "=== старт: $PLAN (timeout=${TIMEOUT}s, max-same=${MAX_SAME}) ==="
+log "=== старт: $PLAN (timeout=${TIMEOUT}s, idle=${IDLE_TIMEOUT}s, max-same=${MAX_SAME}) ==="
 while true; do
   if ! NEXT="$("$PY" "$PLAN_CLI" next "$PLAN")"; then
     log "circle_plan.py next вышел с ошибкой — стоп"; STOP_REASON="crash"; break
@@ -212,13 +218,15 @@ while true; do
   START="Прочитай файл $WORK/executor-prompt.md и выполни инструкцию из него полностью, ничего не спрашивая."
 
   set +e
-  "$PY" "$RUN_PHASE" --result "$RESULT" --timeout "$TIMEOUT" --log "$LOG" --label "фаза $PHASE_ID" -- \
+  rm -f "$CTX_FILE"
+  "$PY" "$RUN_PHASE" --result "$RESULT" --timeout "$TIMEOUT" --idle-timeout "$IDLE_TIMEOUT" \
+        --context-out "$CTX_FILE" --log "$LOG" --label "фаза $PHASE_ID" -- \
         "$CLAUDE_BIN" --dangerously-skip-permissions "$START"
   RC=$?
   set -e
   if ! H2="$(hash_plan)"; then log "hash_plan после сессии: ошибка — стоп"; STOP_REASON="crash"; break; fi
 
-  if [ "$RC" -eq 2 ]; then log "таймаут сессии (${TIMEOUT}s) — стоп"; STOP_REASON="hang"; break; fi
+  if [ "$RC" -eq 2 ]; then log "сессия оборвана по дедлайну (wall=${TIMEOUT}s / idle=${IDLE_TIMEOUT}s; причина — см. CIRCLE_PHASE_END выше) — стоп"; STOP_REASON="hang"; break; fi
   if [ "$RC" -eq 3 ]; then log "сессия завершилась без result — стоп"; STOP_REASON="crash"; break; fi
   if [ "$RC" -ne 0 ]; then log "run_phase rc=$RC — стоп"; STOP_REASON="error"; break; fi
   if [ "$H1" = "$H2" ]; then log "план не изменился после сессии — стоп (нет прогресса)"; STOP_REASON="no-progress"; break; fi
@@ -257,10 +265,12 @@ except Exception:
 TELE_META
     T_OUTCOME="${PHASE_STATUS:-error}"
     [ "$PLAN_CHANGED" = 0 ] && [ "$PHASE_STATUS" != "done" ] && T_OUTCOME="no-change"
+    CTX_PCT="$(cat "$CTX_FILE" 2>/dev/null || true)"
     printf '%s\n' "$DIFF_FILES" | CIRCLE_TELEMETRY_SALT="$TELE_SALT" "$PY" "$TELEMETRY" record-phase "$PLAN" "$PHASE_ID" \
       --work "$WORK" --ordinal "${T_ORD:-0}" --attempts "$SAME_COUNT" --duration-s "$PHASE_DUR" \
       --outcome "$T_OUTCOME" --plan-changed "$PLAN_CHANGED" --committed "$COMMITTED" \
       --deps-count "${T_DEPS:-0}" --autonomy "${T_AUTON:-auto}" --subphases-added "$SUBPHASES" \
+      --context-pct "${CTX_PCT:-}" \
       2>>"$LOG" || log "телеметрия record-phase фазы $PHASE_ID: ошибка (best-effort)"
   fi
   log "фаза $PHASE_ID обработана; продолжаю"

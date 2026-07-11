@@ -138,6 +138,125 @@ class TestRunPhase(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 4)
 
+    def test_idle_timeout_fires_on_silent_child(self):
+        # Ребёнок один раз пишет в PTY, затем молчит. При включённом --idle-timeout
+        # цикл обязан оборвать сессию по простою (rc=2) намного раньше абсолютного
+        # --timeout, а не ждать весь потолок.
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys,time;sys.stdout.write('hi\\n');sys.stdout.flush();time.sleep(30)",
+        ]
+        t0 = time.monotonic()
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "60",
+             "--idle-timeout", "1", "--", *cmd],
+            capture_output=True, text=True, timeout=60,
+        )
+        dt = time.monotonic() - t0
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertLess(dt, 15)  # оборвано по idle(~1s), не по wall(60s)
+
+    def test_idle_timeout_not_tripped_by_active_child(self):
+        # Ребёнок непрерывно пишет в PTY дольше idle-окна, затем пишет result.
+        # Активность обязана сбрасывать таймер простоя → штатный rc=0, без ложного обрыва.
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys,time\n"
+            "for _ in range(40):\n"
+            "    sys.stdout.write('tick\\n'); sys.stdout.flush(); time.sleep(0.1)\n"
+            f"open({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')\n",
+        ]
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "60",
+             "--idle-timeout", "2", "--", *cmd],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)  # 4s активности > 2s idle, но не оборвано
+
+    def test_idle_timeout_disabled_by_default(self):
+        # Без --idle-timeout (дефолт 0=выкл) молчание ребёнка НЕ обрывает сессию:
+        # ребёнок молчит 2s и пишет result — обязан быть rc=0, а не idle-обрыв.
+        cmd = [
+            sys.executable,
+            "-c",
+            f"import time;time.sleep(2);open({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')",
+        ]
+        r = run(self.result, 10, cmd)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_rejects_non_finite_idle_timeout(self):
+        cmd = [sys.executable, "-c", "pass"]
+        r = subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "5",
+             "--idle-timeout", "nan", "--", *cmd],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(r.returncode, 4)
+
+    def test_idle_timeout_logs_reason(self):
+        # На обрыве по простою в --log должна лечь строка-маркер причины (пост-мортем).
+        log = os.path.join(self.d, "loop.log")
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys,time;sys.stdout.write('hi\\n');sys.stdout.flush();time.sleep(30)",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "60",
+             "--idle-timeout", "1", "--log", log, "--", *cmd],
+            capture_output=True, text=True, timeout=60,
+        )
+        body = open(log, encoding="utf-8").read()
+        self.assertIn("CIRCLE_PHASE_END: idle", body)
+
+    def test_wall_timeout_logs_reason(self):
+        # Обрыв по абсолютному потолку (idle выкл) кладёт в --log wall-маркер причины.
+        log = os.path.join(self.d, "loop.log")
+        cmd = [sys.executable, "-c", "import time;time.sleep(30)"]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "1",
+             "--log", log, "--", *cmd],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertIn("CIRCLE_PHASE_END: wall-timeout", open(log, encoding="utf-8").read())
+
+    def test_hard_deadline_logs_reason(self):
+        # Жёсткий SIGALRM-путь (главный цикл заблокирован в select дольше timeout) тоже
+        # обязан оставить wall-маркер — цикл документирует «причина — см. CIRCLE_PHASE_END».
+        log = os.path.join(self.d, "loop.log")
+        cmd = [sys.executable, "-c", "import time;time.sleep(20)"]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "1",
+             "--poll", "20", "--log", log, "--", *cmd],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertIn("CIRCLE_PHASE_END: wall-timeout", open(log, encoding="utf-8").read())
+
+    def test_end_marker_after_buffered_partial_frame(self):
+        # Хронология пост-мортема: недотерминированный кадр (вывод без хвостового \n —
+        # типичная TUI-перерисовка перед зависанием) обязан лечь в лог ДО маркера конца,
+        # а не после. Ловит регресс, где _emit_end писал мимо ещё не сброшенного фильтра.
+        log = os.path.join(self.d, "loop.log")
+        cmd = [
+            sys.executable,
+            "-c",
+            "import sys,time;sys.stdout.write('THINKING_NO_NL');sys.stdout.flush();time.sleep(30)",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "60",
+             "--idle-timeout", "1", "--log", log, "--", *cmd],
+            capture_output=True, text=True, timeout=60,
+        )
+        body = open(log, encoding="utf-8").read()
+        self.assertIn("THINKING_NO_NL", body)
+        self.assertIn("CIRCLE_PHASE_END: idle", body)
+        self.assertLess(
+            body.index("THINKING_NO_NL"), body.index("CIRCLE_PHASE_END"),
+            "буферизованный кадр должен предшествовать маркеру конца",
+        )
+
     def test_returns_3_when_child_exits_without_result(self):
         cmd = [sys.executable, "-c", "import sys;sys.exit(0)"]
         r = run(self.result, 10, cmd)
@@ -152,6 +271,46 @@ class TestRunPhase(unittest.TestCase):
         ]
         r = run(self.result, 10, cmd)
         self.assertEqual(r.returncode, 0)
+
+
+class TestContextOut(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.result = os.path.join(self.d, "result")
+
+    def test_context_out_writes_peak(self):
+        # --context-out получает ПИК контекста за сессию (48), не последнее значение (20).
+        ctxf = os.path.join(self.d, "context-pct")
+        log = os.path.join(self.d, "loop.log")
+        child = [
+            sys.executable, "-c",
+            "import sys,time\n"
+            "for v in (12,48,20):\n"
+            "    sys.stdout.write('bar %d%% | t\\n'%v); sys.stdout.flush(); time.sleep(0.1)\n"
+            f"open({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')\n",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "10",
+             "--log", log, "--context-out", ctxf, "--", *child],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(open(ctxf, encoding="utf-8").read().strip(), "48")
+
+    def test_context_out_empty_when_no_statusbar(self):
+        # Нет распознанного статус-бара → пустой файл (честное «неизвестно», не 0).
+        ctxf = os.path.join(self.d, "context-pct")
+        log = os.path.join(self.d, "loop.log")
+        child = [
+            sys.executable, "-c",
+            f"import sys;sys.stdout.write('no bar\\n');sys.stdout.flush();"
+            f"open({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "10",
+             "--log", log, "--context-out", ctxf, "--", *child],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(open(ctxf, encoding="utf-8").read().strip(), "")
 
 
 class TestLogFilter(unittest.TestCase):
@@ -238,6 +397,17 @@ class TestLogFilter(unittest.TestCase):
     def test_context_pct_updates_to_latest(self):
         f = self._filter(b"bar 10% | t\n", b"bar 25% | t\n")
         self.assertEqual(f.ctx, 25)
+
+    def test_context_peak_holds_max_not_last(self):
+        # Пик держит максимум за сессию, даже если контекст потом «просел» (auto-compact
+        # роняет %). Именно пик отвечает на «была ли фаза пухлой».
+        f = self._filter(b"bar 12% | t\n", b"bar 48% | t\n", b"bar 15% | t\n")
+        self.assertEqual(f.ctx, 15)  # текущий — последний
+        self.assertEqual(f.ctx_peak, 48)  # пик — максимум
+
+    def test_context_peak_none_when_never_seen(self):
+        f = self._filter(b"no statusbar here\n")
+        self.assertIsNone(f.ctx_peak)
 
 
 class TestProgressLine(unittest.TestCase):

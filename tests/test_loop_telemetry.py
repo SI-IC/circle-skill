@@ -87,6 +87,10 @@ class TestLoopTelemetry(unittest.TestCase):
         self.assertTrue(rec["has_codebase_map"])
         self.assertEqual(rec["sessions_total"], 2)   # две auto-фазы
         self.assertGreaterEqual(len(rec["phases"]), 1)
+        # схема v3: пик контекста из статус-бара fake-сессии (40%) сквозняком долетает до записи
+        self.assertEqual(rec["schema_version"], "3")
+        for ph in rec["phases"]:
+            self.assertEqual(ph["context_pct"], 40)
         self.assertNotIn("plan.md", json.dumps(rec))  # ни одного пути/имени файла
         self.assertNotIn(d, json.dumps(rec))          # ни абсолютного пути проекта
         # статус-строка в сводке

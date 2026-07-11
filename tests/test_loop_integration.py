@@ -150,6 +150,16 @@ class TestLoopIntegration(unittest.TestCase):
         s = self._summary(plan)
         self.assertIn("STOP_REASON=hang", s)
 
+    def test_stops_on_idle_timeout_before_wall(self):
+        # Молчащая сессия обрывается по idle-дедлайну раньше абсолютного потолка:
+        # idle=2s срабатывает задолго до wall=60s. Проверяет, что цикл прокидывает
+        # --idle-timeout в run_phase и что причина видна в loop.log.
+        plan = self._plan()
+        run_loop(plan, "hang", timeout="60", extra_env={"CIRCLE_IDLE_TIMEOUT": "2"})
+        self.assertIn("STOP_REASON=hang", self._summary(plan))
+        log = open(os.path.join(self._work(plan), "loop.log"), encoding="utf-8").read()
+        self.assertIn("CIRCLE_PHASE_END: idle", log)
+
     def test_stops_when_stuck_on_same_phase(self):
         plan = self._plan()
         run_loop(plan, "churn", extra_env={"CIRCLE_MAX_SAME_PHASE": "2"})

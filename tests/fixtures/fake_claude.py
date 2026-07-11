@@ -33,6 +33,10 @@ def commit_work(plan, phase):
 
 def main():
     mode = os.environ.get("FAKE_MODE", "done")
+    # Эмулируем нижний статус-бар TUI с потреблением контекста — run_phase вытащит из него
+    # пик и положит в --context-out (сквозная проверка телеметрии context_pct).
+    sys.stdout.write("[fake-model] ######## 40% | timer main\n")
+    sys.stdout.flush()
     if mode == "hang":
         time.sleep(300)
         return 0

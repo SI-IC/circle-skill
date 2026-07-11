@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Запускает команду (интерактивный claude) под PTY; ждёт появления файла-результата,
-затем убивает процесс. Коды: 0=result появился, 2=таймаут, 3=процесс вышел без result."""
+затем убивает процесс. Коды: 0=result появился, 2=таймаут (простой или абсолютный
+потолок), 3=процесс вышел без result.
+
+Два независимых дедлайна. `--idle-timeout` (адаптивный) ловит зависание по МОЛЧАНИЮ
+PTY: живой claude непрерывно тикает статус-баром TUI (в т. ч. пока крутится долгий
+tool — тест/сборка), поэтому «ноль байт из PTY дольше idle» = процесс завис, а не «фаза
+просто долгая». `--timeout` (абсолютный потолок) — страховка от runaway; ставится большим,
+чтобы не рубить здоровую-но-долгую фазу, и подкреплён жёстким SIGALRM-backstop."""
 
 import argparse, math, os, re, select, signal, sys, time
 
@@ -41,6 +48,7 @@ class _LogFilter:
         self.buf = b""
         self.last = None
         self.ctx = None  # последнее замеченное потребление контекста, % (None — ещё не видели)
+        self.ctx_peak = None  # пик потребления контекста за сессию, % (для телеметрии)
 
     def feed(self, data):
         self.buf += data
@@ -60,6 +68,8 @@ class _LogFilter:
         m = _CTX_RE.search(clean)  # обновляем потребление контекста из статус-бара
         if m:
             self.ctx = int(m.group(1))
+            if self.ctx_peak is None or self.ctx > self.ctx_peak:
+                self.ctx_peak = self.ctx
         self.fh.write(clean + b"\n")
         self.fh.flush()
 
@@ -131,12 +141,28 @@ def _emit_progress(fh, ctx, label):
     fh.flush()
 
 
+def _end_reason(logf, logfilter, reason):
+    """Строка-маркер причины завершения сессии в лог (пост-мортем): по какому дедлайну
+    оборвано — простой (idle) или абсолютный потолок (wall). No-op без --log.
+    Перед маркером ДОСБРАСЫВАЕМ фильтр: недотерминированный кадр (TUI-перерисовка `\\r`
+    без хвостового `\\n`) иначе осел бы в буфере и лёг в лог ПОСЛЕ маркера конца (flush
+    из finally идёт позже) — хронология пост-мортема поехала бы."""
+    if not logf:
+        return
+    if logfilter:
+        logfilter.flush()
+    logf.write((time.strftime("%Y-%m-%dT%H:%M:%S ") + "CIRCLE_PHASE_END: " + reason + "\n").encode())
+    logf.flush()
+
+
 def main(argv=None):
     import pty
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--result", required=True)
-    ap.add_argument("--timeout", type=float, default=3600.0)
+    ap.add_argument("--timeout", type=float, default=3600.0)  # абсолютный потолок wall-clock
+    ap.add_argument("--idle-timeout", type=float, default=0.0)  # обрыв по молчанию PTY; 0 = выкл
+    ap.add_argument("--context-out", default=None)  # файл: пик потребления контекста, % (для телеметрии)
     ap.add_argument("--log", default=None)
     ap.add_argument("--poll", type=float, default=1.0)
     ap.add_argument("--heartbeat", type=float, default=5.0)  # период строки прогресса, сек
@@ -160,6 +186,14 @@ def main(argv=None):
             "run_phase: poll должен быть конечным положительным числом", file=sys.stderr
         )
         return 4
+    # idle-timeout опционален (0/отрицательный → выкл), но заданное число обязано быть
+    # конечным: inf/nan сломали бы сравнение простоя ниже и молча отключили бы дедлайн.
+    if a.idle_timeout and not math.isfinite(a.idle_timeout):
+        print(
+            "run_phase: idle-timeout должен быть конечным числом (0 = выкл)",
+            file=sys.stderr,
+        )
+        return 4
 
     try:
         os.unlink(a.result)
@@ -177,6 +211,7 @@ def main(argv=None):
     logf = open(a.log, "ab") if a.log else None
     logfilter = _LogFilter(logf) if logf else None
     start = time.monotonic()
+    last_activity = start  # монотоника последнего непустого чтения PTY — база idle-дедлайна
     next_hb = start + a.heartbeat  # когда писать следующий heartbeat прогресса
     rc = 0
     child_alive = True
@@ -205,8 +240,10 @@ def main(argv=None):
                     data = os.read(fd, 65536)
                 except OSError:
                     data = b""
-                if data and logfilter:
-                    logfilter.feed(data)
+                if data:
+                    last_activity = time.monotonic()  # живой TUI тикает → сброс idle-таймера
+                    if logfilter:
+                        logfilter.feed(data)
             # Heartbeat прогресса: периодически пишем в лог потребление контекста сессии — под
             # строкой цикла «выбрана фаза X» видно, что сессия жива и сколько контекста съела.
             if logf and time.monotonic() >= next_hb:
@@ -229,20 +266,39 @@ def main(argv=None):
                         break
                     time.sleep(0.05)
                 break
-            if time.monotonic() - start > a.timeout:
+            now = time.monotonic()
+            # Idle-дедлайн (адаптивный): молчание PTY дольше idle → зависание. Мягкая
+            # проверка достаточна — select выше просыпается раз в --poll, дольше не блокируемся.
+            if a.idle_timeout > 0 and now - last_activity > a.idle_timeout:
+                _end_reason(logf, logfilter, f"idle-timeout: нет вывода PTY {a.idle_timeout:.0f}s")
+                rc = 2
+                break
+            if now - start > a.timeout:
+                _end_reason(logf, logfilter, f"wall-timeout: абсолютный потолок {a.timeout:.0f}s")
                 rc = 2
                 break
     except _Deadline:
         # Если result успел появиться до срабатывания дедлайна (гонка в окне между
         # удачным break и снятием alarm) — честно отдаём 0, не ложный таймаут.
         rc = 0 if _result_ready(a.result) else 2
+        if rc == 2:  # тот же контракт пост-мортема, что и у мягких дедлайнов
+            _end_reason(logf, logfilter, f"wall-timeout: жёсткий SIGALRM-backstop {a.timeout:.0f}s")
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
         if child_alive:
             _terminate(pid)
         if logfilter:
-            logfilter.flush()
+            logfilter.flush()  # добираем последний кадр (может нести финальный ctx) до снятия пика
+        if a.context_out:
+            # Пик потребления контекста за сессию → файл для телеметрии цикла. Пусто, если
+            # статус-бар ни разу не распознан (нет --log / TUI не рисовал бар). Best-effort.
+            peak = logfilter.ctx_peak if logfilter else None
+            try:
+                with open(a.context_out, "w") as cf:
+                    cf.write("" if peak is None else str(peak))
+            except OSError:
+                pass
         if logf:
             logf.close()
         try:
