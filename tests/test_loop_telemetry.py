@@ -87,10 +87,12 @@ class TestLoopTelemetry(unittest.TestCase):
         self.assertTrue(rec["has_codebase_map"])
         self.assertEqual(rec["sessions_total"], 2)   # две auto-фазы
         self.assertGreaterEqual(len(rec["phases"]), 1)
-        # схема v3: пик контекста из статус-бара fake-сессии (40%) сквозняком долетает до записи
-        self.assertEqual(rec["schema_version"], "3")
+        # схема v4: пик контекста из статус-бара fake-сессии (40%) сквозняком долетает до записи
+        self.assertEqual(rec["schema_version"], "4")
         for ph in rec["phases"]:
             self.assertEqual(ph["context_pct"], 40)
+            # промахи манифеста: fake пишет miss(2) в manifest-status → цикл→телеметрия→запись
+            self.assertEqual(ph["manifest_miss_count"], 2)
         self.assertNotIn("plan.md", json.dumps(rec))  # ни одного пути/имени файла
         self.assertNotIn(d, json.dumps(rec))          # ни абсолютного пути проекта
         # статус-строка в сводке

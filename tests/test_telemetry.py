@@ -146,6 +146,32 @@ class TestRecordPhase(unittest.TestCase):
         )
         self.assertIsNone(rec["context_pct"])
 
+    def _miss(self, token):
+        return tele.record_phase(
+            self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,
+            outcome="done", plan_changed=True, committed=True, deps_count=0,
+            autonomy="auto", subphases_added=0, touched_paths=[], manifest_misses=token,
+        )["manifest_miss_count"]
+
+    def test_manifest_miss_token_valid(self):
+        self.assertEqual(self._miss("miss(3)"), 3)
+        self.assertEqual(self._miss("ok"), 0)          # отчитанный ноль — 0, НЕ None
+        self.assertEqual(self._miss("miss(0)"), 0)
+        # регистронезависимо + обрамляющие пробелы/перевод строки (файл пишется printf'ом)
+        self.assertEqual(self._miss("OK"), 0)
+        self.assertEqual(self._miss("Ok\n"), 0)
+        self.assertEqual(self._miss("MISS(2)"), 2)
+        self.assertEqual(self._miss("  miss(2)\n"), 2)
+        self.assertEqual(self._miss("miss(999999)"), 100000)  # зажим сверху
+
+    def test_manifest_miss_token_garbage_is_none(self):
+        # None = «не отчиталась», отличимо от отчитанного 0. Строгий разбор: проза/голое число/
+        # хвост после токена НЕ склеиваются в фейк-цифру, а честно дают None.
+        for bad in (None, "", "?", "abc", "3", "0",
+                    "miss(2) — 2 renamed files", "miss(2)miss(3)", "miss()",
+                    "miss(-5)", "miss(2)(3)", "misses(2)"):
+            self.assertIsNone(self._miss(bad), bad)
+
     def test_journal_bytes_positive(self):
         rec = tele.record_phase(
             self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,

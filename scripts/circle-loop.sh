@@ -29,6 +29,7 @@ LOG="$WORK/loop.log"
 RESULT="$WORK/result"
 SUMMARY="$WORK/summary.txt"
 CTX_FILE="$WORK/context-pct"   # run_phase пишет сюда пик контекста сессии, % (для телеметрии)
+MISS_FILE="$WORK/manifest-status"  # сессия пишет сюда токен ok/miss(N) — промахи манифеста (телеметрия)
 
 log(){ printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 
@@ -218,7 +219,7 @@ while true; do
   START="Прочитай файл $WORK/executor-prompt.md и выполни инструкцию из него полностью, ничего не спрашивая."
 
   set +e
-  rm -f "$CTX_FILE"
+  rm -f "$CTX_FILE" "$MISS_FILE"
   "$PY" "$RUN_PHASE" --result "$RESULT" --timeout "$TIMEOUT" --idle-timeout "$IDLE_TIMEOUT" \
         --context-out "$CTX_FILE" --log "$LOG" --label "фаза $PHASE_ID" -- \
         "$CLAUDE_BIN" --dangerously-skip-permissions "$START"
@@ -266,11 +267,15 @@ TELE_META
     T_OUTCOME="${PHASE_STATUS:-error}"
     [ "$PLAN_CHANGED" = 0 ] && [ "$PHASE_STATUS" != "done" ] && T_OUTCOME="no-change"
     CTX_PCT="$(cat "$CTX_FILE" 2>/dev/null || true)"
+    # Промахи манифеста: читаем сырой токен (ограниченно — токен крошечный, гигант = мусор),
+    # строгий разбор `ok`/`miss(N)`→int делает Python (_parse_miss_count); файла нет → пусто → null.
+    MISS_RAW=""
+    [ -s "$MISS_FILE" ] && MISS_RAW="$(head -c 64 "$MISS_FILE" 2>/dev/null || true)"
     printf '%s\n' "$DIFF_FILES" | CIRCLE_TELEMETRY_SALT="$TELE_SALT" "$PY" "$TELEMETRY" record-phase "$PLAN" "$PHASE_ID" \
       --work "$WORK" --ordinal "${T_ORD:-0}" --attempts "$SAME_COUNT" --duration-s "$PHASE_DUR" \
       --outcome "$T_OUTCOME" --plan-changed "$PLAN_CHANGED" --committed "$COMMITTED" \
       --deps-count "${T_DEPS:-0}" --autonomy "${T_AUTON:-auto}" --subphases-added "$SUBPHASES" \
-      --context-pct "${CTX_PCT:-}" \
+      --context-pct "${CTX_PCT:-}" --manifest-misses "${MISS_RAW:-}" \
       2>>"$LOG" || log "телеметрия record-phase фазы $PHASE_ID: ошибка (best-effort)"
   fi
   log "фаза $PHASE_ID обработана; продолжаю"

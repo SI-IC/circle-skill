@@ -56,6 +56,9 @@ def main():
         os.system(f"{sys.executable} {plan_cli} set-status {plan} {phase} done")
         with open(plan, "a", encoding="utf-8") as f:
             f.write(f"\n### fake: фаза {phase} выполнена\n")
+        # отчёт о промахах манифеста (шаг 5 executor-prompt) — сигнал стоимости въезда
+        with open(os.path.join(work, "manifest-status"), "w", encoding="utf-8") as f:
+            f.write("miss(2)\n")
         if commit_enabled:
             commit_work(plan, phase)
     elif mode == "done_dirty":

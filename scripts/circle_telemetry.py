@@ -18,7 +18,7 @@ import re
 import socket
 import uuid
 
-SCHEMA_VERSION = "3"  # v3: +context_pct на фазу (пик потребления контекста, %)
+SCHEMA_VERSION = "4"  # v4: +manifest_miss_count на фазу (промахи манифеста, self-report сессии)
 
 STOP_REASONS = frozenset({"complete", "no-progress", "hang", "crash", "error", "stuck"})
 OUTCOMES = frozenset({"done", "blocked", "no-change", "skipped", "crash", "error"})
@@ -78,6 +78,28 @@ def _parse_context_pct(value):
         return None
 
 
+_MISS_RE = re.compile(r"^miss\((\d+)\)$", re.IGNORECASE)
+
+
+def _parse_miss_count(value):
+    """Строгий разбор self-report токена промахов манифеста → int ≥0 или None.
+    Принимает РОВНО `ok` (→0) или `miss(N)` (→N), регистронезависимо, без хвоста. Всё прочее
+    (пусто / проза / `miss(2) — foo` / `miss()` / голое число) → None = «сессия не отчиталась»,
+    отличимо от отчитанного 0 (`ok`). Строгость намеренна: рыхлый разбор склеил бы цифры из
+    пояснения в правдоподобное фейк-число (`miss(2) 2 файла` → 22) — а фейк хуже честного None.
+    Токен эмитит сама сессия (знает свой манифест), НЕ path-diff (declared-vs-touched по прозе
+    манифеста был в схеме v1 — всегда 0, регэксп не парсил прозу; удалён)."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if s.lower() == "ok":
+        return 0
+    m = _MISS_RE.match(s)
+    if not m:
+        return None
+    return max(0, min(100000, int(m.group(1))))
+
+
 # --- парс плана (только счётчики; пути живут и умирают в процессе) -------------
 
 def has_codebase_map(text):
@@ -114,7 +136,7 @@ def _append_line(path, line):
 
 def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, outcome,
                  plan_changed, committed, deps_count, autonomy, subphases_added,
-                 touched_paths, context_pct=None):
+                 touched_paths, context_pct=None, manifest_misses=None):
     """Детерминированный скелет фазы: длительность, попытки, число изменённых файлов, флаги.
     Дописывает JSON-строку в <work>/run-stats/phases.jsonl.
 
@@ -122,7 +144,11 @@ def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, ou
     не распознан. Отвечает на «фаза пухлая или просто долгая?»: duration_s меряет время, а это —
     именно нагрузку на контекст, независимую ось. Важно при разборе: None при БОЛЬШОМ duration_s
     (живой TUI рисует бар непрерывно) ⇒ извлечение сломано (дрейф формата бара), а не низкая
-    нагрузка — образец нераспознанного кадра ищи в loop.log по `CIRCLE_CTX_UNPARSED`."""
+    нагрузка — образец нераспознанного кадра ищи в loop.log по `CIRCLE_CTX_UNPARSED`.
+
+    manifest_misses — сырой self-report токен сессии о промахах манифеста (`ok`/`miss(N)`; файл
+    переехал/отсутствовал/пришлось трогать файл вне манифеста) — сигнал стоимости «въезда» в фазу.
+    Строго разбирается в int ≥0 или None (не отчиталась, отличимо от 0). См. _parse_miss_count."""
     touched = set(touched_paths)
     rec = {
         "ordinal": clamp_int(ordinal, 0, 100000),
@@ -137,6 +163,7 @@ def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, ou
         "files_changed": len(touched),
         "journal_digest_bytes": _journal_bytes(plan_text),
         "context_pct": _parse_context_pct(context_pct),
+        "manifest_miss_count": _parse_miss_count(manifest_misses),
     }
     _append_line(os.path.join(_run_stats_dir(work), "phases.jsonl"),
                  json.dumps(rec, ensure_ascii=False))
@@ -357,6 +384,7 @@ def main(argv=None):
     p.add_argument("--autonomy", default="auto")
     p.add_argument("--subphases-added", default=0)
     p.add_argument("--context-pct", default="")  # пик контекста, %; пусто = неизвестно
+    p.add_argument("--manifest-misses", default="")  # промахи манифеста; пусто = не отчиталась
 
     p = sub.add_parser("build-run")
     p.add_argument("plan")
@@ -394,7 +422,7 @@ def main(argv=None):
             committed=(str(a.committed) not in ("0", "", "false", "False")),
             deps_count=a.deps_count, autonomy=a.autonomy,
             subphases_added=a.subphases_added, touched_paths=touched,
-            context_pct=a.context_pct,
+            context_pct=a.context_pct, manifest_misses=a.manifest_misses,
         )
         return 0
 
