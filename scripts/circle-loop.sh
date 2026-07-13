@@ -30,6 +30,7 @@ RESULT="$WORK/result"
 SUMMARY="$WORK/summary.txt"
 CTX_FILE="$WORK/context-pct"   # run_phase пишет сюда пик контекста сессии, % (для телеметрии)
 MISS_FILE="$WORK/manifest-status"  # сессия пишет сюда токен ok/miss(N) — промахи манифеста (телеметрия)
+CTX_UNPARSED_FILE="$WORK/run-stats/ctx-unparsed.log"  # образцы нераспознанного бара, копятся за прогон (диагностика _CTX_RE, локально)
 
 log(){ printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 
@@ -221,7 +222,7 @@ while true; do
   set +e
   rm -f "$CTX_FILE" "$MISS_FILE"
   "$PY" "$RUN_PHASE" --result "$RESULT" --timeout "$TIMEOUT" --idle-timeout "$IDLE_TIMEOUT" \
-        --context-out "$CTX_FILE" --log "$LOG" --label "фаза $PHASE_ID" -- \
+        --context-out "$CTX_FILE" --ctx-unparsed-out "$CTX_UNPARSED_FILE" --log "$LOG" --label "фаза $PHASE_ID" -- \
         "$CLAUDE_BIN" --dangerously-skip-permissions "$START"
   RC=$?
   set -e

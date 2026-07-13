@@ -331,6 +331,28 @@ class TestContextOut(unittest.TestCase):
         self.assertEqual(open(ctxf, encoding="utf-8").read().strip(), "")
         self.assertIn("CIRCLE_CTX_UNPARSED", open(log, encoding="utf-8").read())
 
+    def test_context_diag_written_to_dedicated_file(self):
+        # --ctx-unparsed-out получает образцы нераспознанного бара в ВЫДЕЛЕННЫЙ файл (копится за
+        # прогон, тривиально грепается — не тонет в многомегабайтном loop.log и доживает до разбора).
+        # Родительский каталог run-stats ещё не существует — run_phase создаёт его best-effort.
+        ctxf = os.path.join(self.d, "context-pct")
+        log = os.path.join(self.d, "loop.log")
+        unp = os.path.join(self.d, "run-stats", "ctx-unparsed.log")
+        child = [
+            sys.executable, "-c",
+            "import sys\n"
+            "sys.stdout.write('[m] bar 42% x | main\\n'); sys.stdout.flush()\n"
+            f"open({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')\n",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "10",
+             "--log", log, "--context-out", ctxf, "--ctx-unparsed-out", unp, "--", *child],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertIn("CIRCLE_CTX_UNPARSED", open(unp, encoding="utf-8").read())
+        # при заданном --ctx-unparsed-out образец идёт туда, НЕ в loop.log (дублировать незачем)
+        self.assertNotIn("CIRCLE_CTX_UNPARSED", open(log, encoding="utf-8").read())
+
 
 class TestLogFilter(unittest.TestCase):
     def _run(self, *chunks):

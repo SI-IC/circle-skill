@@ -172,6 +172,7 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, default=3600.0)  # абсолютный потолок wall-clock
     ap.add_argument("--idle-timeout", type=float, default=0.0)  # обрыв по молчанию PTY; 0 = выкл
     ap.add_argument("--context-out", default=None)  # файл: пик потребления контекста, % (для телеметрии)
+    ap.add_argument("--ctx-unparsed-out", default=None)  # файл: образцы нераспознанного бара (диагностика _CTX_RE)
     ap.add_argument("--log", default=None)
     ap.add_argument("--poll", type=float, default=1.0)
     ap.add_argument("--heartbeat", type=float, default=5.0)  # период строки прогресса, сек
@@ -308,13 +309,29 @@ def main(argv=None):
                     cf.write("" if peak is None else str(peak))
             except OSError:
                 pass
-        if logf and logfilter and logfilter.ctx_peak is None and logfilter.ctx_diag:
+        if logfilter and logfilter.ctx_peak is None and logfilter.ctx_diag:
             # Бар ни разу не распознан, но были бар-подобные кадры → вероятен дрейф формата
-            # статус-бара. Образцы кладём В ЛОГ (локально, НЕ в телеметрию: кадр может нести
-            # пути/ветки), чтобы _CTX_RE чинить по реальной строке, а не гадать вслепую.
-            for frame in logfilter.ctx_diag:
-                logf.write(b"CIRCLE_CTX_UNPARSED: " + frame + b"\n")
-            logf.flush()
+            # статус-бара. Образцы кладём в ВЫДЕЛЕННЫЙ файл --ctx-unparsed-out (копится за прогон
+            # через append — цикл даёт один путь на все фазы; тривиально грепается и доживает до
+            # разбора, в отличие от многомегабайтного loop.log, где образец тонет). Нет этого
+            # файла → fallback в loop.log. ЛОКАЛЬНО, НЕ в телеметрию: кадр может нести пути/ветки,
+            # потому _CTX_RE чиним по реальной строке, а не гадаем вслепую.
+            samples = b"".join(b"CIRCLE_CTX_UNPARSED: " + frame + b"\n"
+                               for frame in logfilter.ctx_diag)
+            wrote = False
+            if a.ctx_unparsed_out:
+                try:
+                    parent = os.path.dirname(a.ctx_unparsed_out)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    with open(a.ctx_unparsed_out, "ab") as uf:
+                        uf.write(samples)
+                    wrote = True
+                except OSError:
+                    pass  # выделенный файл не удался (диск/права/гонка) → ниже fallback в loop.log
+            if not wrote and logf:  # нет флага ИЛИ его запись сорвалась — не теряем единственный образец
+                logf.write(samples)
+                logf.flush()
         if logf:
             logf.close()
         try:

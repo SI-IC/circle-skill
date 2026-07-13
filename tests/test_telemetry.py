@@ -216,6 +216,24 @@ class TestScrubAndBuild(unittest.TestCase):
         self.assertTrue(rec["has_codebase_map"])
         self.assertEqual(rec["status_counts"], {"done": 2})
 
+    def test_build_preserves_meaningful_null_fields(self):
+        # context_pct / manifest_miss_count = None НЕ выкидываются из фазовой записи: null
+        # («измерено, но неизвестно» / «сессия не отчиталась») — это осмысленный датум, отличимый
+        # от «поля не было» (старая схема). Прочие None по-прежнему чистятся _drop_none.
+        rec = tele.build_run_record(
+            plan_text=_PLAN, plugin_version="1.2.3", machine="host", plan_slug="p",
+            salt="s", stop_reason="complete", run_wall_s=1, sessions_total=1,
+            phases_total=1, status_counts={"done": 1},
+            phase_recs=[{"ordinal": 1, "outcome": "done", "context_pct": None,
+                         "manifest_miss_count": None, "gone": None}],
+        )
+        ph = rec["phases"][0]
+        self.assertIn("context_pct", ph)
+        self.assertIsNone(ph["context_pct"])
+        self.assertIn("manifest_miss_count", ph)
+        self.assertIsNone(ph["manifest_miss_count"])
+        self.assertNotIn("gone", ph)  # прочие None-поля выкидываются как раньше
+
     def test_build_run_uuid_override(self):
         # Валидный переданный run_uuid используется как есть (склейка снимков одного прогона на
         # приёмнике); мусорный/инъекционный — игнорируется, генерится свежий.

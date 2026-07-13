@@ -188,8 +188,14 @@ def scrub_record(rec):
     return False  # неизвестный тип → дроп
 
 
-def _drop_none(d):
-    return {k: v for k, v in d.items() if v is not None}
+# Поля фазы, где None — осмысленный датум («измерено, но неизвестно» / «сессия не отчиталась»),
+# отличимый от «поля не было». Их НЕ выкидываем из записи; null-в-v4 от отсутствия-в-старых схемах
+# аналитик различает по schema_version. См. _parse_context_pct / _parse_miss_count.
+_MEANINGFUL_NONE = ("context_pct", "manifest_miss_count")
+
+
+def _drop_none(d, keep=()):
+    return {k: v for k, v in d.items() if v is not None or k in keep}
 
 
 def build_run_record(*, plan_text, plugin_version, machine, plan_slug, salt, stop_reason,
@@ -212,7 +218,7 @@ def build_run_record(*, plan_text, plugin_version, machine, plan_slug, salt, sto
     }
     phases = []
     for pr in phase_recs:
-        phases.append(_drop_none({k: v for k, v in pr.items()}))
+        phases.append(_drop_none(pr, keep=_MEANINGFUL_NONE))
     rec = {
         "schema_version": SCHEMA_VERSION,
         "plugin_version": plugin_version if string_ok(plugin_version) else "0",
