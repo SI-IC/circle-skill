@@ -189,6 +189,8 @@ class TestLoopIntegration(unittest.TestCase):
         run_loop(plan, "blocked")
         log = self._git_log(plan)
         self.assertNotIn("circle: phase", log)
+        # сквозная проводка S1: фаза 1 blocked ⇒ остаток не развязан ⇒ stop_reason=stalled (не complete)
+        self.assertIn("STOP_REASON=stalled", self._summary(plan))
 
     def test_failing_hook_is_not_bypassed(self):
         # Хук проекта уважается: pre-commit, падающий на коммите сессии, НЕ обходится (--no-verify

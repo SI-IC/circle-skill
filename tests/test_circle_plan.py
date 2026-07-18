@@ -109,6 +109,77 @@ class TestSelect(unittest.TestCase):
         self.assertFalse(cp.is_complete(phases))
 
 
+class TestStopClass(unittest.TestCase):
+    def _ph(self, **kw):
+        base = dict(
+            id="x", title="t", status="pending", order=0, deps=[], autonomy="auto"
+        )
+        base.update(kw)
+        return cp.Phase(**base)
+
+    def test_complete_when_all_done(self):
+        phases = [self._ph(id="1", status="done", order=10)]
+        self.assertFalse(cp.is_stalled(phases))
+        self.assertEqual(cp.stop_class(phases), "complete")
+
+    def test_complete_when_done_and_skipped(self):
+        phases = [
+            self._ph(id="1", status="done", order=10),
+            self._ph(id="2", status="skipped", order=20),
+        ]
+        self.assertFalse(cp.is_stalled(phases))
+        self.assertEqual(cp.stop_class(phases), "complete")
+
+    def test_stalled_when_blocked_remains(self):
+        # done+blocked+skipped: is_complete=True (нечего исполнять), но фаза blocked ⇒ план НЕ доведён.
+        phases = [
+            self._ph(id="1", status="done", order=10),
+            self._ph(id="2", status="blocked", order=20),
+            self._ph(id="3", status="skipped", order=30),
+        ]
+        self.assertTrue(cp.is_complete(phases))
+        self.assertTrue(cp.is_stalled(phases))
+        self.assertEqual(cp.stop_class(phases), "stalled")
+
+    def test_stalled_when_pending_unreachable(self):
+        # pending, чья зависимость skipped/blocked, никогда не выбирается → застряло.
+        phases = [
+            self._ph(id="1", status="blocked", order=10),
+            self._ph(id="2", status="pending", order=20, deps=["1"]),
+        ]
+        self.assertTrue(cp.is_stalled(phases))
+        self.assertEqual(cp.stop_class(phases), "stalled")
+
+    def test_complete_when_only_needs_human_pending(self):
+        # Осознанный хендофф: цикл отработал автономный мандат, needs-human ждёт человека → complete.
+        phases = [
+            self._ph(id="1", status="done", order=10),
+            self._ph(id="2", status="pending", autonomy="needs-human", order=20),
+        ]
+        self.assertFalse(cp.is_stalled(phases))
+        self.assertEqual(cp.stop_class(phases), "complete")
+
+    def test_stalled_when_auto_pending_stranded_behind_skipped(self):
+        # auto-фаза, чья зависимость skipped, никогда не выбирается — цикл должен был её довести,
+        # но не смог (нет blocked-фазы, но остаток НЕ развязан осознанно) → stalled.
+        phases = [
+            self._ph(id="1", status="skipped", order=10),
+            self._ph(id="2", status="pending", autonomy="auto", order=20, deps=["1"]),
+        ]
+        self.assertTrue(cp.is_stalled(phases))
+        self.assertEqual(cp.stop_class(phases), "stalled")
+
+    def test_not_stalled_when_eligible_remains(self):
+        # Есть что исполнять (не терминальное состояние) → не stalled даже при наличии pending.
+        phases = [self._ph(id="1", status="pending", order=10)]
+        self.assertFalse(cp.is_stalled(phases))
+        self.assertEqual(cp.stop_class(phases), "complete")
+
+    def test_empty_plan_is_complete(self):
+        self.assertFalse(cp.is_stalled([]))
+        self.assertEqual(cp.stop_class([]), "complete")
+
+
 class TestWrite(unittest.TestCase):
     def test_set_status_preserves_other_fields(self):
         text = (
@@ -348,6 +419,32 @@ class TestSummaryCLI(unittest.TestCase):
         )
         r = self._cli("next", path)
         self.assertEqual(r.stdout.strip(), "NONE")
+
+    def test_cli_stop_class_stalled(self):
+        # PLAN: done + blocked + pending(deps=[1]-done)→ фаза 3 исполнима? deps=[1] done ⇒ eligible.
+        # Заблокируем: пометим фазу 1 blocked, тогда 3 (deps=[1]) неисполнима, а сама 1 blocked.
+        path = self._write(
+            self.PLAN.replace(
+                'status=done order=10 deps=[] autonomy=auto obstacle=""',
+                'status=blocked order=10 deps=[] autonomy=auto obstacle="нет БД"',
+            )
+        )
+        r = self._cli("stop-class", path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "stalled")
+
+    def test_cli_stop_class_complete(self):
+        path = self._write(
+            self.PLAN.replace(
+                "status=pending order=30 deps=[1]", "status=done order=30 deps=[1]"
+            ).replace(
+                'status=blocked order=20 deps=[] autonomy=auto obstacle="нет БД"',
+                'status=skipped order=20 deps=[] autonomy=auto obstacle=""',
+            )
+        )
+        r = self._cli("stop-class", path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "complete")
 
     def test_cli_set_status_roundtrip(self):
         path = self._write(self.PLAN)

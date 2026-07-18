@@ -147,6 +147,32 @@ def is_complete(phases):
     return select_next(phases) is None
 
 
+def is_stalled(phases):
+    """True, когда циклу нечего исполнять (select_next=None), НО остались фазы, которые он ДОЛЖЕН
+    был довести и не довёл: `blocked` (сессия упёрлась в препятствие) или auto-фаза в pending
+    (могла исполниться, но осталась — обычно застряла за blocked/skipped-зависимостью). Ложь, если
+    ещё есть что исполнять (не терминальное состояние) ИЛИ остаток — только осознанные развязки:
+    `done`, `skipped` и pending `needs-human` (намеренный хендофф человеку — это `complete`, цикл
+    отработал свой автономный мандат). Отделяет `stalled` от `complete` в stop_reason телеметрии:
+    `complete` при наличии `blocked` иначе завышал бы долю доведённых планов (см. прогон, где
+    `{blocked:1, pending:3}` рапортовался как complete). `in_progress` тут не проверяем: select_next
+    возвращает такую фазу безусловно, поэтому при select_next=None фаз in_progress уже нет."""
+    if select_next(phases) is not None:
+        return False
+    for p in phases:
+        if p.status == "blocked":
+            return True
+        if p.status == "pending" and p.autonomy == "auto":
+            return True
+    return False
+
+
+def stop_class(phases):
+    """Терминальная классификация для stop_reason цикла, когда фаз к исполнению не осталось:
+    'stalled' — остались незавершённые фазы (см. is_stalled); иначе 'complete'."""
+    return "stalled" if is_stalled(phases) else "complete"
+
+
 def _render_marker(status, order, deps, autonomy, obstacle):
     ob = obstacle.replace('"', '\\"')
     return (
@@ -252,7 +278,7 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(prog="circle_plan")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("next", "complete", "summary", "phases", "journal"):
+    for name in ("next", "complete", "stop-class", "summary", "phases", "journal"):
         sp = sub.add_parser(name)
         sp.add_argument("plan")
         if name in ("summary", "phases"):
@@ -284,6 +310,9 @@ def main(argv=None):
             return 0
         if a.cmd == "complete":
             return 0 if is_complete(phases) else 1
+        if a.cmd == "stop-class":
+            print(stop_class(phases))
+            return 0
         if a.cmd == "journal":
             body = journal_section(text)
             if body:

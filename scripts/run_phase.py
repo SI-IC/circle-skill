@@ -172,6 +172,7 @@ def main(argv=None):
     ap.add_argument("--timeout", type=float, default=3600.0)  # абсолютный потолок wall-clock
     ap.add_argument("--idle-timeout", type=float, default=0.0)  # обрыв по молчанию PTY; 0 = выкл
     ap.add_argument("--context-out", default=None)  # файл: пик потребления контекста, % (для телеметрии)
+    ap.add_argument("--ctx-status-out", default=None)  # файл: parsed/drift/absent — судьба извлечения ctx (телеметрия)
     ap.add_argument("--ctx-unparsed-out", default=None)  # файл: образцы нераспознанного бара (диагностика _CTX_RE)
     ap.add_argument("--log", default=None)
     ap.add_argument("--poll", type=float, default=1.0)
@@ -307,6 +308,26 @@ def main(argv=None):
             try:
                 with open(a.context_out, "w") as cf:
                     cf.write("" if peak is None else str(peak))
+            except OSError:
+                pass
+        if a.ctx_status_out:
+            # Судьба извлечения context_pct за сессию → телеметрия (ctx_parse_failed): `parsed` —
+            # бар распознан ≥1 раз; `drift` — бар-подобные кадры были, но `N% |` не сматчился
+            # (вероятен дрейф формата TUI, чинибельно); `absent` — бара не было вовсе (headless/
+            # тихая сессия). Разводит два вида context_pct=null, которые иначе неразличимы. Best-effort.
+            # Без --log (logfilter=None) контекст не отслеживался → пустой файл (тот же контракт, что и
+            # у --context-out: «не отчитались», _parse_ctx_failed("")=None), а не отсутствие файла.
+            if logfilter is None:
+                status = ""
+            elif logfilter.ctx_peak is not None:
+                status = "parsed"
+            elif logfilter.ctx_diag:
+                status = "drift"
+            else:
+                status = "absent"
+            try:
+                with open(a.ctx_status_out, "w") as sf:
+                    sf.write(status)
             except OSError:
                 pass
         if logfilter and logfilter.ctx_peak is None and logfilter.ctx_diag:

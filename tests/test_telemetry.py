@@ -172,6 +172,33 @@ class TestRecordPhase(unittest.TestCase):
                     "miss(-5)", "miss(2)(3)", "misses(2)"):
             self.assertIsNone(self._miss(bad), bad)
 
+    def _ctxfail(self, token):
+        return tele.record_phase(
+            self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,
+            outcome="done", plan_changed=True, committed=True, deps_count=0,
+            autonomy="auto", subphases_added=0, touched_paths=[], ctx_status=token,
+        )["ctx_parse_failed"]
+
+    def test_ctx_parse_failed_from_status_token(self):
+        self.assertTrue(self._ctxfail("drift"))       # бар был, регэксп не сматчил → дрейф
+        self.assertFalse(self._ctxfail("parsed"))     # распознан ≥1 раз
+        self.assertFalse(self._ctxfail("absent"))     # бара не было (headless)
+        # регистронезависимо + обрамляющие пробелы (файл читается cat'ом из shell)
+        self.assertTrue(self._ctxfail(" DRIFT\n"))
+
+    def test_ctx_parse_failed_none_when_unreported(self):
+        # None = run_phase не отчитался (отличимо от достоверного False); мусор тоже → None
+        for bad in (None, "", "?", "abc", "1"):
+            self.assertIsNone(self._ctxfail(bad), bad)
+
+    def test_ctx_parse_failed_defaults_none_when_omitted(self):
+        rec = tele.record_phase(
+            self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,
+            outcome="done", plan_changed=True, committed=True,
+            deps_count=0, autonomy="auto", subphases_added=0, touched_paths=[],
+        )
+        self.assertIsNone(rec["ctx_parse_failed"])
+
     def test_journal_bytes_positive(self):
         rec = tele.record_phase(
             self.tmp, _PLAN, "1", ordinal=10, attempts=1, duration_s=1,
@@ -225,14 +252,28 @@ class TestScrubAndBuild(unittest.TestCase):
             salt="s", stop_reason="complete", run_wall_s=1, sessions_total=1,
             phases_total=1, status_counts={"done": 1},
             phase_recs=[{"ordinal": 1, "outcome": "done", "context_pct": None,
-                         "manifest_miss_count": None, "gone": None}],
+                         "manifest_miss_count": None, "ctx_parse_failed": None,
+                         "gone": None}],
         )
         ph = rec["phases"][0]
         self.assertIn("context_pct", ph)
         self.assertIsNone(ph["context_pct"])
         self.assertIn("manifest_miss_count", ph)
         self.assertIsNone(ph["manifest_miss_count"])
+        self.assertIn("ctx_parse_failed", ph)  # None = «run_phase не отчитался», не выкидываем
+        self.assertIsNone(ph["ctx_parse_failed"])
         self.assertNotIn("gone", ph)  # прочие None-поля выкидываются как раньше
+
+    def test_build_accepts_stalled_stop_reason(self):
+        # 'stalled' (план застрял на блокере) — валидный stop_reason, запись не дропается гейтом.
+        rec = tele.build_run_record(
+            plan_text=_PLAN, plugin_version="1.2.3", machine="host", plan_slug="p",
+            salt="s", stop_reason="stalled", run_wall_s=1, sessions_total=1,
+            phases_total=4, status_counts={"blocked": 1, "pending": 3},
+            phase_recs=[{"ordinal": 1, "outcome": "blocked"}],
+        )
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["stop_reason"], "stalled")
 
     def test_build_run_uuid_override(self):
         # Валидный переданный run_uuid используется как есть (склейка снимков одного прогона на

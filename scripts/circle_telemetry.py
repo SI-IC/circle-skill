@@ -18,9 +18,11 @@ import re
 import socket
 import uuid
 
-SCHEMA_VERSION = "4"  # v4: +manifest_miss_count на фазу (промахи манифеста, self-report сессии)
+SCHEMA_VERSION = "5"  # v5: +ctx_parse_failed на фазу (дрейф _CTX_RE) + stop_reason 'stalled'
 
-STOP_REASONS = frozenset({"complete", "no-progress", "hang", "crash", "error", "stuck"})
+STOP_REASONS = frozenset(
+    {"complete", "stalled", "no-progress", "hang", "crash", "error", "stuck"}
+)
 OUTCOMES = frozenset({"done", "blocked", "no-change", "skipped", "crash", "error"})
 STATUS_KINDS = frozenset({"pending", "in_progress", "done", "blocked", "skipped"})
 AUTONOMY_KINDS = frozenset({"auto", "needs-human"})
@@ -100,6 +102,23 @@ def _parse_miss_count(value):
     return max(0, min(100000, int(m.group(1))))
 
 
+def _parse_ctx_failed(value):
+    """Токен статуса извлечения контекста из статус-бара сессии → bool или None.
+    `drift` (бар в кадрах был, но `N% |` не сматчился — вероятен дрейф формата TUI) → True;
+    `parsed` (распознан ≥1 раз) / `absent` (бар-подобных кадров не было вовсе) → False;
+    пусто/неизвестное → None (run_phase не отчитался, отличимо от достоверного False).
+    Пара с context_pct разводит три исхода: (pct≠null)=ok; (pct=null, failed=True)=дрейф
+    регэкспа (чинибельно); (pct=null, failed=False)=бара нет (headless/тихая сессия)."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s == "drift":
+        return True
+    if s in ("parsed", "absent"):
+        return False
+    return None
+
+
 # --- парс плана (только счётчики; пути живут и умирают в процессе) -------------
 
 def has_codebase_map(text):
@@ -136,7 +155,7 @@ def _append_line(path, line):
 
 def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, outcome,
                  plan_changed, committed, deps_count, autonomy, subphases_added,
-                 touched_paths, context_pct=None, manifest_misses=None):
+                 touched_paths, context_pct=None, manifest_misses=None, ctx_status=None):
     """Детерминированный скелет фазы: длительность, попытки, число изменённых файлов, флаги.
     Дописывает JSON-строку в <work>/run-stats/phases.jsonl.
 
@@ -148,7 +167,11 @@ def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, ou
 
     manifest_misses — сырой self-report токен сессии о промахах манифеста (`ok`/`miss(N)`; файл
     переехал/отсутствовал/пришлось трогать файл вне манифеста) — сигнал стоимости «въезда» в фазу.
-    Строго разбирается в int ≥0 или None (не отчиталась, отличимо от 0). См. _parse_miss_count."""
+    Строго разбирается в int ≥0 или None (не отчиталась, отличимо от 0). См. _parse_miss_count.
+
+    ctx_status — токен run_phase о судьбе извлечения context_pct (`parsed`/`drift`/`absent`) →
+    ctx_parse_failed: True только для `drift` (бар был, но регэксп не сматчил). Отделяет чинибельный
+    дрейф `_CTX_RE` от честного отсутствия бара (обе дают context_pct=null). См. _parse_ctx_failed."""
     touched = set(touched_paths)
     rec = {
         "ordinal": clamp_int(ordinal, 0, 100000),
@@ -164,6 +187,7 @@ def record_phase(work, plan_text, phase_id, *, ordinal, attempts, duration_s, ou
         "journal_digest_bytes": _journal_bytes(plan_text),
         "context_pct": _parse_context_pct(context_pct),
         "manifest_miss_count": _parse_miss_count(manifest_misses),
+        "ctx_parse_failed": _parse_ctx_failed(ctx_status),
     }
     _append_line(os.path.join(_run_stats_dir(work), "phases.jsonl"),
                  json.dumps(rec, ensure_ascii=False))
@@ -189,9 +213,9 @@ def scrub_record(rec):
 
 
 # Поля фазы, где None — осмысленный датум («измерено, но неизвестно» / «сессия не отчиталась»),
-# отличимый от «поля не было». Их НЕ выкидываем из записи; null-в-v4 от отсутствия-в-старых схемах
-# аналитик различает по schema_version. См. _parse_context_pct / _parse_miss_count.
-_MEANINGFUL_NONE = ("context_pct", "manifest_miss_count")
+# отличимый от «поля не было». Их НЕ выкидываем из записи; null-в-текущей-схеме от отсутствия-в-старых
+# аналитик различает по schema_version. См. _parse_context_pct / _parse_miss_count / _parse_ctx_failed.
+_MEANINGFUL_NONE = ("context_pct", "manifest_miss_count", "ctx_parse_failed")
 
 
 def _drop_none(d, keep=()):
@@ -391,6 +415,7 @@ def main(argv=None):
     p.add_argument("--subphases-added", default=0)
     p.add_argument("--context-pct", default="")  # пик контекста, %; пусто = неизвестно
     p.add_argument("--manifest-misses", default="")  # промахи манифеста; пусто = не отчиталась
+    p.add_argument("--ctx-status", default="")  # parsed/drift/absent; пусто = run_phase не отчитался
 
     p = sub.add_parser("build-run")
     p.add_argument("plan")
@@ -429,6 +454,7 @@ def main(argv=None):
             deps_count=a.deps_count, autonomy=a.autonomy,
             subphases_added=a.subphases_added, touched_paths=touched,
             context_pct=a.context_pct, manifest_misses=a.manifest_misses,
+            ctx_status=a.ctx_status,
         )
         return 0
 

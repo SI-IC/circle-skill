@@ -29,6 +29,7 @@ LOG="$WORK/loop.log"
 RESULT="$WORK/result"
 SUMMARY="$WORK/summary.txt"
 CTX_FILE="$WORK/context-pct"   # run_phase пишет сюда пик контекста сессии, % (для телеметрии)
+CTX_STATUS_FILE="$WORK/ctx-status"  # run_phase пишет сюда parsed/drift/absent — судьба извлечения ctx (телеметрия)
 MISS_FILE="$WORK/manifest-status"  # сессия пишет сюда токен ok/miss(N) — промахи манифеста (телеметрия)
 CTX_UNPARSED_FILE="$WORK/run-stats/ctx-unparsed.log"  # образцы нераспознанного бара, копятся за прогон (диагностика _CTX_RE, локально)
 
@@ -170,7 +171,17 @@ while true; do
     log "circle_plan.py next вышел с ошибкой — стоп"; STOP_REASON="crash"; break
   fi
   if [ "$NEXT" = "NONE" ]; then
-    log "нет подходящих фаз — план исполнен полностью"; STOP_REASON="complete"; break
+    # Фаз к исполнению не осталось. complete (остаток — done/skipped/pending needs-human: цикл
+    # отработал автономный мандат) vs stalled (blocked или застрявшие за деп-ом auto-фазы — план НЕ
+    # доведён). Классифицирует circle_plan.py. Сбой классификатора (не должен случаться: next только
+    # что вернул NONE ⇒ план парсится) → crash с логом, как у ошибки next выше, а НЕ молчаливый
+    # complete: тот завысил бы долю доведённых — ровно то, от чего S1. stderr классификатора → лог.
+    if STOP_REASON="$("$PY" "$PLAN_CLI" stop-class "$PLAN" 2>>"$LOG")"; then
+      log "нет подходящих фаз — стоп ($STOP_REASON)"
+    else
+      log "stop-class: ошибка классификации терминального состояния — стоп (crash)"; STOP_REASON="crash"
+    fi
+    break
   fi
   if [[ "$NEXT" != *$'\t'* ]]; then
     log "circle_plan.py next: неожиданный формат '$NEXT' — стоп"; STOP_REASON="crash"; break
@@ -220,9 +231,10 @@ while true; do
   START="Прочитай файл $WORK/executor-prompt.md и выполни инструкцию из него полностью, ничего не спрашивая."
 
   set +e
-  rm -f "$CTX_FILE" "$MISS_FILE"
+  rm -f "$CTX_FILE" "$CTX_STATUS_FILE" "$MISS_FILE"
   "$PY" "$RUN_PHASE" --result "$RESULT" --timeout "$TIMEOUT" --idle-timeout "$IDLE_TIMEOUT" \
-        --context-out "$CTX_FILE" --ctx-unparsed-out "$CTX_UNPARSED_FILE" --log "$LOG" --label "фаза $PHASE_ID" -- \
+        --context-out "$CTX_FILE" --ctx-status-out "$CTX_STATUS_FILE" \
+        --ctx-unparsed-out "$CTX_UNPARSED_FILE" --log "$LOG" --label "фаза $PHASE_ID" -- \
         "$CLAUDE_BIN" --dangerously-skip-permissions "$START"
   RC=$?
   set -e
@@ -268,6 +280,7 @@ TELE_META
     T_OUTCOME="${PHASE_STATUS:-error}"
     [ "$PLAN_CHANGED" = 0 ] && [ "$PHASE_STATUS" != "done" ] && T_OUTCOME="no-change"
     CTX_PCT="$(cat "$CTX_FILE" 2>/dev/null || true)"
+    CTX_STATUS="$(cat "$CTX_STATUS_FILE" 2>/dev/null || true)"  # parsed/drift/absent; пусто = не отчитался
     # Промахи манифеста: читаем сырой токен (ограниченно — токен крошечный, гигант = мусор),
     # строгий разбор `ok`/`miss(N)`→int делает Python (_parse_miss_count); файла нет → пусто → null.
     MISS_RAW=""
@@ -276,7 +289,7 @@ TELE_META
       --work "$WORK" --ordinal "${T_ORD:-0}" --attempts "$SAME_COUNT" --duration-s "$PHASE_DUR" \
       --outcome "$T_OUTCOME" --plan-changed "$PLAN_CHANGED" --committed "$COMMITTED" \
       --deps-count "${T_DEPS:-0}" --autonomy "${T_AUTON:-auto}" --subphases-added "$SUBPHASES" \
-      --context-pct "${CTX_PCT:-}" --manifest-misses "${MISS_RAW:-}" \
+      --context-pct "${CTX_PCT:-}" --manifest-misses "${MISS_RAW:-}" --ctx-status "${CTX_STATUS:-}" \
       2>>"$LOG" || log "телеметрия record-phase фазы $PHASE_ID: ошибка (best-effort)"
   fi
   log "фаза $PHASE_ID обработана; продолжаю"

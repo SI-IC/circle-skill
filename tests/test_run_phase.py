@@ -353,6 +353,57 @@ class TestContextOut(unittest.TestCase):
         # при заданном --ctx-unparsed-out образец идёт туда, НЕ в loop.log (дублировать незачем)
         self.assertNotIn("CIRCLE_CTX_UNPARSED", open(log, encoding="utf-8").read())
 
+    def _ctx_status(self, child_body):
+        # Гоняет дочерний скрипт под run_phase с --ctx-status-out, возвращает записанный токен.
+        statusf = os.path.join(self.d, "ctx-status")
+        log = os.path.join(self.d, "loop.log")
+        child = [
+            sys.executable, "-c",
+            child_body + f"\nopen({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')\n",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "10",
+             "--log", log, "--ctx-status-out", statusf, "--", *child],
+            capture_output=True, text=True, timeout=60,
+        )
+        return open(statusf, encoding="utf-8").read().strip()
+
+    def test_ctx_status_parsed_when_bar_recognized(self):
+        self.assertEqual(
+            self._ctx_status("import sys;sys.stdout.write('bar 42% | t\\n');sys.stdout.flush()"),
+            "parsed",
+        )
+
+    def test_ctx_status_drift_when_bar_unparsed(self):
+        # бар-подобный кадр («%…|»), но «N% |» не сматчился → дрейф формата, чинибельно
+        self.assertEqual(
+            self._ctx_status("import sys;sys.stdout.write('[m] 42% x | main\\n');sys.stdout.flush()"),
+            "drift",
+        )
+
+    def test_ctx_status_absent_when_no_bar(self):
+        self.assertEqual(
+            self._ctx_status("import sys;sys.stdout.write('plain text\\n');sys.stdout.flush()"),
+            "absent",
+        )
+
+    def test_ctx_status_empty_file_without_log(self):
+        # Без --log контекст не отслеживается: файл всё равно создаётся, но пустой (тот же контракт,
+        # что и у --context-out) — «не отчитались», а не отсутствие файла. Симметрия флагов S2.
+        statusf = os.path.join(self.d, "ctx-status")
+        child = [
+            sys.executable, "-c",
+            "import sys;sys.stdout.write('bar 42% | t\\n');sys.stdout.flush()\n"
+            f"open({self.result!r},'w').write('CIRCLE_RESULT: PHASE_DONE')\n",
+        ]
+        subprocess.run(
+            [sys.executable, SCRIPT, "--result", self.result, "--timeout", "10",
+             "--ctx-status-out", statusf, "--", *child],  # без --log
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertTrue(os.path.exists(statusf))
+        self.assertEqual(open(statusf, encoding="utf-8").read().strip(), "")
+
 
 class TestLogFilter(unittest.TestCase):
     def _run(self, *chunks):
