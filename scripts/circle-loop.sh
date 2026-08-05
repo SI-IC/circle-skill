@@ -7,6 +7,7 @@ PLAN_IN="${1:?usage: circle-loop.sh <plan-path>}"
 PLAN="$(cd "$(dirname "$PLAN_IN")" && pwd)/$(basename "$PLAN_IN")"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 CLAUDE_BIN="${CIRCLE_CLAUDE_BIN:-claude}"
+CLAUDE_MODEL="${CIRCLE_CLAUDE_MODEL:-}"
 PY="${CIRCLE_PYTHON:-python3}"
 # Два дедлайна сессии (см. run_phase.py). IDLE — адаптивный детектор зависания по молчанию
 # PTY: живой claude тикает статус-баром даже во время долгого тула, поэтому «тишина дольше idle»
@@ -34,6 +35,11 @@ MISS_FILE="$WORK/manifest-status"  # сессия пишет сюда токен
 CTX_UNPARSED_FILE="$WORK/run-stats/ctx-unparsed.log"  # образцы нераспознанного бара, копятся за прогон (диагностика _CTX_RE, локально)
 
 log(){ printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
+
+if [ -n "$CLAUDE_MODEL" ] && ! printf '%s' "$CLAUDE_MODEL" | grep -qE '^[]A-Za-z0-9_.:[-]+$'; then
+  log "CIRCLE_CLAUDE_MODEL='$CLAUDE_MODEL' — недопустимый формат, стоп до первой фазы"
+  exit 1
+fi
 
 # Гарантия: вся .circle/ — вне VCS. Логи фаз несут сырой вывод сессий (возможны
 # секреты/чувствительные данные), коммитить их нельзя. `*` в .gitignore покрывает поддерево.
@@ -230,12 +236,16 @@ while true; do
   fi
   START="Прочитай файл $WORK/executor-prompt.md и выполни инструкцию из него полностью, ничего не спрашивая."
 
+  CLAUDE_ARGS=("$CLAUDE_BIN" --dangerously-skip-permissions)
+  [ -n "$CLAUDE_MODEL" ] && CLAUDE_ARGS+=(--model "$CLAUDE_MODEL")
+  CLAUDE_ARGS+=("$START")
+
   set +e
   rm -f "$CTX_FILE" "$CTX_STATUS_FILE" "$MISS_FILE"
   "$PY" "$RUN_PHASE" --result "$RESULT" --timeout "$TIMEOUT" --idle-timeout "$IDLE_TIMEOUT" \
         --context-out "$CTX_FILE" --ctx-status-out "$CTX_STATUS_FILE" \
         --ctx-unparsed-out "$CTX_UNPARSED_FILE" --log "$LOG" --label "фаза $PHASE_ID" -- \
-        "$CLAUDE_BIN" --dangerously-skip-permissions "$START"
+        "${CLAUDE_ARGS[@]}"
   RC=$?
   set -e
   if ! H2="$(hash_plan)"; then log "hash_plan после сессии: ошибка — стоп"; STOP_REASON="crash"; break; fi

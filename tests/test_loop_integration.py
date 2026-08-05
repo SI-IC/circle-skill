@@ -125,6 +125,35 @@ class TestLoopIntegration(unittest.TestCase):
         gi = os.path.join(os.path.dirname(plan), ".circle", ".gitignore")
         self.assertEqual(open(gi, encoding="utf-8").read().strip(), "*")
 
+    def test_passes_model_to_claude_when_set(self):
+        plan = self._plan()
+        argv_out = plan + ".argv"
+        run_loop(plan, "done", extra_env={
+            "CIRCLE_CLAUDE_MODEL": "claude-opus-5",
+            "FAKE_ARGV_OUT": argv_out,
+        })
+        argv = open(argv_out, encoding="utf-8").read().split("\n")
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-5")
+
+    def test_no_model_flag_when_unset(self):
+        plan = self._plan()
+        argv_out = plan + ".argv"
+        run_loop(plan, "done", extra_env={"FAKE_ARGV_OUT": argv_out})
+        argv = open(argv_out, encoding="utf-8").read().split("\n")
+        self.assertNotIn("--model", argv)
+
+    def test_rejects_malformed_model_before_first_phase(self):
+        plan = self._plan()
+        argv_out = plan + ".argv"
+        r = run_loop(plan, "done", extra_env={
+            "CIRCLE_CLAUDE_MODEL": '$(touch pwned)',
+            "FAKE_ARGV_OUT": argv_out,
+        })
+        self.assertFalse(os.path.exists(argv_out), "claude не должен запускаться с недопустимой моделью")
+        log = open(os.path.join(self._work(plan), "loop.log"), encoding="utf-8").read()
+        self.assertIn("недопустимый формат", log)
+
     def test_separate_work_dirs_per_plan(self):
         # Два плана в одной директории не должны делить .circle/ (логи/result/summary).
         d = tempfile.mkdtemp()
